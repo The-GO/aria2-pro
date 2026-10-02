@@ -2,8 +2,9 @@
 
 面向 **aria2 1.37.0** 的一键安装 / 管理 / 后处理方案。
 
-基于 [P3TERX/aria2.sh](https://github.com/P3TERX/aria2.sh) 与 [P3TERX/aria2.conf](https://github.com/P3TERX/aria2.conf) 重写。
-这两个上游项目分别停留在 **2020 年 (v2.7.4)** 和 **2021 年**，已无法用于安装当前版本的 aria2。
+灵感与初始代码来自 [P3TERX/aria2.sh](https://github.com/P3TERX/aria2.sh) 与 [P3TERX/aria2.conf](https://github.com/P3TERX/aria2.conf)（均已停止维护，分别停留在 2020 年 v2.7.4 与 2021 年）。
+
+本项目**运行期零第三方脚本依赖**：不下载、不执行任何外部 shell 脚本，init.d 服务脚本与 Tracker 更新工具全部内嵌。
 
 ---
 
@@ -96,7 +97,13 @@ bash install.sh --conf-dir /root/.aria2 --downloads /data/downloads --aria2c /us
 
 环境变量：`ARIA2_CONF_DIR`、`DOWNLOAD_PATH`、`ARIA2C`、`INSTALL_SRC`。
 
-检测到已存在 `/etc/init.d/aria2` 时**保留 init.d 管理方式**并自动打补丁（避免与 systemd unit 产生两个竞争的服务定义）。
+服务管理方式自动选择：
+
+- 检测到已有 `/etc/init.d/aria2` → 沿 用 init.d，并**替换为 `service/aria2_debian`**（已内置全部修复），避免与 systemd unit 产生两个竞争的服务定义
+- 否则有 systemd → 安装 systemd 单元
+- 无 systemd → 安装 `service/aria2_debian`
+
+`service/aria2_centos` 用于 CentOS（通过 `chkconfig` 注册）。两个脚本均已内置：僵尸进程排除、按 `--conf-path` 精确匹配本实例（同机多实例不误杀）、`stop` 等待真正退出、`start` 轮询就绪替代固定 `sleep 2s`。
 
 安装过程会：安装依赖 → 下载 1.37.0 静态二进制 → 部署配置与钩子 → 重写配置中的路径 → 生成随机 RPC 密钥 → 安装服务单元 → 创建下载目录。
 
@@ -170,8 +177,7 @@ bash bin/aria2.sh    # 8 查看配置 → 输出 AriaNg 一键链接
 
 常见 Web 前端：
 
-- [AriaNg](https://github.com/mayswind/AriaNg) — 纯静态，`http://ariang.js.org`
-- [ariang](https://github.com/P3TERX/ariang) — 同上
+- [AriaNg](https://github.com/mayswind/AriaNg) — 官方版，纯静态页面，可直接用 `http://ariang.js.org`
 - [WebUI-Aria2](https://github.com/ziahamza/webui-aria2) — Node 实现
 
 若 RPC 无法连接，检查：`rpc-listen-all=true` 是否开启、防火墙是否放行端口、`rpc-secret` 是否填写正确。
@@ -238,19 +244,29 @@ on-download-error         = /root/.aria2/hooks/delete.sh
 `script.conf`：
 
 ```ini
-drive-name=OneDrive
-drive-dir=/Backup/Downloads
-rclone-transfers=4
-rclone-checkers=8
+drive-name=OneDrive                    # rclone 配置中的 name
+drive-dir=/Backup/Downloads            # 网盘目标目录, 留空为根目录
+rclone-transfers=4                     # 并发传输数
+rclone-checkers=8                      # 并发检查数
 ```
 
 行为：**`rclone copy` → `rclone check` 哈希校验 → 校验通过才删本地**。
 
 与上游的关键差异：上游用 `rclone move`，上传一开始就搬走本地数据，一旦失败（或上传不完整）数据处于不一致状态。本实现保证本地数据只在远端**确认完整**后才删除。
 
-自动重试 3 次，退避 5s / 10s / 15s，失败时保留本地并返回非零退出码。
+共 4 次尝试（首次 + 3 次重试），退避 5s / 10s / 15s；全部失败时保留本地文件、返回非零退出码（aria2 会记录钩子失败）。
 
 ---
+
+## 移动到本地目录（move.sh）
+
+在 `script.conf` 中配置 `dest-dir`（安装时默认设为 `<下载目录>/completed`），下载完成后任务目录会被移动过去。需在 `aria2.conf` 中把完成钩子从 `clean.sh` 改为 `move.sh`：
+
+```ini
+on-download-complete = /root/.aria2/hooks/move.sh
+```
+
+日志记录到 `move-log` 指定的路径（留空则不记录）。
 
 ## 文件过滤
 
@@ -283,7 +299,7 @@ bash bin/tracker-update.sh /root/.aria2/aria2.conf
 bash bin/tracker-update.sh --test        # 测速所有源, 不写入配置
 ```
 
-`tracker-update.sh` 依次尝试 5 个源并合并去重（主源优先）：
+`tracker-update.sh` 依次尝试 4 个源并合并去重（主源优先）：
 
 | 源 | 说明 |
 |----|------|
@@ -292,10 +308,7 @@ bash bin/tracker-update.sh --test        # 测速所有源, 不写入配置
 | `https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt` | 备用 |
 | `https://trackerslist.com/best.txt` | 备用（与主源同内容） |
 
-实测聚合后约 122 个去重 tracker。协议覆盖 `udp` / `http` / `https` / `wss`（WebTorrent）。
-
-`bash bin/tracker-update.sh --test` 可测速各源，不写入配置。
-
+实测聚合后约 122 个去重 tracker。协议覆盖 `udp` / `http` / `https` / `wss`（WebTorrent）。内容过时的源（如 ngosang，仅 20 条）已剔除。
 写入使用 `awk` 而非 `sed`——tracker 列表含大量正则元字符（`/` `:` `.` `-`），用 `sed` 做替换会解析失败。
 
 ---
@@ -358,10 +371,20 @@ tail -f /root/.aria2/hooks.log      # 钩子日志(清理/上传/删除的详细
 `aria2.conf` 中存在 aria2 1.37 已移除的选项。本项目配置已逐项针对 1.37.0 校验。若你手动加过 `retry-on-400` / `retry-on-403` / `retry-on-406` / `retry-on-unknown` / `bt-lpd-port` / `dht-listen-port6`，请删除它们——这些都不是有效的 aria2 选项名。
 
 **Q: 下载速度慢 / BT 没速度？**
-更新 tracker：`bash bin/aria2.sh` → 11。或开启自动更新（12）。同时确认 `enable-dht=true`、`listen-port` 端口已在防火墙放行。
+按顺序排查：
+
+1. 更新 tracker：`bash bin/aria2.sh` → 11，或开启自动更新（12）
+2. 确认防火墙放行 `listen-port`（TCP）与 `dht-listen-port`（UDP）整个范围
+3. 确认 `enable-dht=true`、`enable-peer-exchange=true`
+4. 冷启动时 DHT 网络需要几分钟建立连接，属正常现象
+
+**Q: 需要 `dht.dat` 吗？**
+不需要。aria2 的 DHT 路由表仅存于内存，且 1.37 没有 `dht-file-path` 配置项。旧版脚本预置的 `dht.dat` 是第三方运行时快照，重启即失效。
 
 **Q: 上传到网盘失败？**
 先单独测试 rclone 连通性：`bash /root/.aria2/hooks/upload.sh`（无参数时只做连接检查）。失败会保留本地文件，不会丢数据。
+
+常见原因是 `rclone.env` / `script.conf` 中 `drive-name` 与 rclone 实际配置的 name 不一致。
 
 **Q: 多文件 BT 任务下载完成，但小文件/广告文件还在？**
 在 `script.conf` 启用过滤（`min-size` / `include-file` / `exclude-file`）。注意过滤只对 `FILE_NUM > 1` 的多文件任务生效。
@@ -392,7 +415,7 @@ x86_64、aarch64/arm64、armv7、i686/i386、loongarch64。由 `abcfy2/aria2-sta
 已内嵌到仓库、不再从外部获取的资源：
 
 - `service/aria2_debian`、`service/aria2_centos` — init.d 服务脚本（含全部修复）
-- `dht.dat` / `dht6.dat` — **不再预置**。它们是 DHT 路由表的运行时数据，aria2 官方从不分发，第三方快照来源不可控。aria2 启动后自行填充并保存
+- `dht.dat` / `dht6.dat` — **不再预置**。aria2 1.37 既没有 `dht-file-path` 选项、官方也从不分发这两个文件：DHT 路由表只存在于进程内存中，退出即丢失，启动后由 DHT 网络自行重建。预置第三方快照既无来源可控性，实际助益也有限。想改善 BT 发现能力，更新 `bt-tracker` 列表远比预置 `dht.dat` 有效
 
 署名（MIT 许可证要求）：初始代码灵感来自 [P3TERX/aria2.sh](https://github.com/P3TERX/aria2.sh) 与 [P3TERX/aria2.conf](https://github.com/P3TERX/aria2.conf)。
 
@@ -400,15 +423,16 @@ x86_64、aarch64/arm64、armv7、i686/i386、loongarch64。由 `abcfy2/aria2-sta
 
 ## 已验证环境
 
-- **Oracle Cloud ARM (aarch64)**，Ubuntu 24.04， aria2 **1.37.0**（静态 musl 构建）
-- 配置逐项校验：`aria2.conf` 全部选项对 1.37.0 有效，无 `Unknown option`
+- **Oracle Cloud ARM (aarch64)**，Ubuntu 24.04，aria2 **1.37.0**（静态 musl 构建）
+- 配置逐项校验：`aria2.conf` 每一个选项都经 `aria2c` 实际加载，无 `Unknown option` / `Parse error`
 - 端到端实测：真实 HTTP 下载（10MB）→ 钩子自动触发 → `.aria2` / 空目录清理，日志零 ERROR
-- 上传链路：`copy → check → 删除本地`，含校验失败时**本地数据保留**验证、4 次尝试退避 5/10/15s
-- init.d 僵尸进程误判已复现并修复；systemd 与 init.d 两种服务管理方式均验证
+- 上传链路：`copy → check → 删除本地`；校验失败时**本地数据保留**已验证
+- init.d 全生命周期实测：`status` / `stop` / `start` / `restart`，含同机多实例隔离（按 `--conf-path` 精确匹配）
 - 安全防护实测：拒绝空路径 / `/` / 下载根目录 / 带尾斜杠的等价路径
+- crontab 精确删除实测：开启/关闭自动 Tracker 更新时，用户其他任务零误删
 
 ---
 
 ## License
 
-MIT（继承上游 P3TERX 项目）
+MIT（与上游 P3TERX 项目相同许可证）
