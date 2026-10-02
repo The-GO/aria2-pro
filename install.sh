@@ -173,31 +173,8 @@ fi
 [[ -s "${ARIA2_CONF_DIR}/dht6.dat" ]] || wget -N -t2 -T20 -q \
     "https://raw.githubusercontent.com/P3TERX/aria2.conf/master/dht6.dat" -O "${ARIA2_CONF_DIR}/dht6.dat" || true
 
-# tracker 更新工具
-cat > "${ARIA2_CONF_DIR}/tracker-update.sh" <<'TRACKER_EOF'
-#!/usr/bin/env bash
-# BT Tracker 更新: 从多个源聚合去重后写入 aria2.conf 的 bt-tracker
-CONF="${1:-/root/.aria2/aria2.conf}"
-[[ -f "${CONF}" ]] || { echo "配置文件不存在: ${CONF}" >&2; exit 1; }
-RAW=""
-for u in \
-    "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt" \
-    "https://trackerslist.com/best.txt" \
-    "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt"; do
-    t="$(wget -t2 -T15 -qO- "${u}" || true)"
-    [[ -n "${t}" ]] && RAW="${RAW}"$'\n'"${t}"
-done
-LIST="$(printf '%s' "${RAW}" | tr -s ', \t' '\n\n\n' | sed 's/^ *//;s/ *$//' \
-    | grep -E '^(udp|http|https)://' | awk '!seen[$0]++' | paste -sd, -)"
-[[ -z "${LIST}" ]] && { echo "未获取到 tracker 列表" >&2; exit 1; }
-if grep -q '^bt-tracker=' "${CONF}"; then
-    awk -v v="${LIST}" 'BEGIN{FS=OFS="="} $1=="bt-tracker"{$2=v; print; next} {print}' "${CONF}" >"${CONF}.tmp" && mv -f "${CONF}.tmp" "${CONF}"
-else
-    printf '\nbt-tracker=%s\n' "${LIST}" >>"${CONF}"
-fi
-echo "已更新 $(printf '%s' "${LIST}" | tr ',' '\n' | wc -l) 个 tracker。"
-TRACKER_EOF
-chmod +x "${ARIA2_CONF_DIR}/tracker-update.sh"
+# tracker 更新工具(独立文件, 不再内嵌 heredoc, 避免两处实现不一致)
+install -m 0755 "${INSTALL_SRC}/bin/tracker-update.sh" "${ARIA2_CONF_DIR}/tracker-update.sh"
 
 mkdir -p "${DOWNLOAD_PATH}" "${DOWNLOAD_PATH}/completed"
 touch "${ARIA2_CONF_DIR}/aria2.session"

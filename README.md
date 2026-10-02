@@ -248,11 +248,32 @@ exclude-file-regex="(.*/)_+(padding)(_*)(file)(.*)(_+)"
 
 ## BT-Tracker
 
+主源：**https://cf.trackerslist.com/best.txt**（Cloudflare CDN）
+
 ```bash
 bash bin/aria2.sh         # 11 = 手动更新, 12 = 自动更新(每日 7:00  cron)
 ```
 
-`tracker-update.sh` 聚合三个上游源、去重后写入 `bt-tracker`。
+或直接调用（可指定配置文件路径）：
+
+```bash
+bash bin/tracker-update.sh /root/.aria2/aria2.conf
+bash bin/tracker-update.sh --test        # 测速所有源, 不写入配置
+```
+
+`tracker-update.sh` 依次尝试 5 个源并合并去重（主源优先）：
+
+| 源 | 说明 |
+|----|------|
+| `https://cf.trackerslist.com/best.txt` | **主源**，Cloudflare CDN，~70 条 |
+| `https://cf.trackerslist.com/all.txt` | 全量列表，~120 条 |
+| `https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt` | 备用 |
+| `https://trackerslist.com/best.txt` | 备用（与主源同内容） |
+| `https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt` | 最低优先级（已过时，仅 20 条） |
+
+实测聚合后约 122 个去重 tracker。协议覆盖 `udp` / `http` / `https` / `wss`（WebTorrent）。
+
+写入使用 `awk` 而非 `sed`——tracker 列表含大量正则元字符（`/` `:` `.` `-`），用 `sed` 做替换会解析失败。
 
 ---
 
