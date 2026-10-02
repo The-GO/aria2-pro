@@ -69,7 +69,7 @@ bash bin/aria2.sh          # 交互式管理面板
  6. 重启 Aria2
 ```
 
-**RPC 密钥与端口** — 安装时随机生成，保存在 `/root/.aria2/aria2.conf`。修改用面板 7 → 1/2/3/4，会自动同步 iptables 并重启。密钥不要包含 `=` 和 `#`。
+**RPC 密钥与端口** — 安装时随机生成，保存在 `/root/.aria2/aria2.conf`。修改用面板 7 → 1/2/3/4，会自动同步 iptables 并重启。密钥可含 `=`、`#`、空格等特殊字符（配置读写均按原文处理，不会截断或转义）。
 
 **连接 AriaNg** — 面板选 8 会输出一键链接；或手动填：服务器 IP + `rpc-listen-port` + `rpc-secret`。可用 [AriaNg](http://ariang.js.org) 或 WebUI-Aria2。连不上时检查 `rpc-listen-all=true`、防火墙、密钥是否正确。
 
@@ -92,7 +92,7 @@ bash bin/aria2.sh    # 选 3
 | `hooks/clean.sh` | 下载完成 | 清理 `.aria2` 控制文件、孤种 `.torrent`、空目录 |
 | `hooks/upload.sh` | 下载完成 | 上传到网盘（需自行把完成钩子改为它） |
 | `hooks/move.sh` | 下载完成 | 移动到本地其他目录（需自行改钩子） |
-| `hooks/delete.sh` | 下载停止/出错 | 删除任务文件（软链控制文件存在才删，防误删已完成文件） |
+| `hooks/delete.sh` | 下载停止/出错 | 任务状态为 error/removed 时删除对应文件（含下载根目录防护，绝不删到根） |
 | `hooks/core` | 被上面调用 | 共享函数库：路径推导、配置解析、RPC、安全防护 |
 
 默认钩子绑定（`aria2.conf`）：

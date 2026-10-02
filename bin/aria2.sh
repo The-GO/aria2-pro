@@ -217,15 +217,26 @@ Download_aria2_conf() {
     cp -f "${src}/conf/aria2.conf" "${src}/conf/script.conf" "${src}/conf/rclone.env" "${ARIA2_CONF_DIR}/"
     cp -f "${src}/hooks/"* "${HOOKS_DIR}/"
     chmod +x "${HOOKS_DIR}/"*.sh
-    sed -i "s@^\(dir=\).*@\1${DOWNLOAD_PATH}@" "${ARIA2_CONF_DIR}/aria2.conf"
-    sed -i "s@^\(log=\).*@\1${ARIA2_CONF_DIR}/aria2.log@" "${ARIA2_CONF_DIR}/aria2.conf"
-    sed -i "s@^\(save-session=\).*@\1${ARIA2_CONF_DIR}/aria2.session@" "${ARIA2_CONF_DIR}/aria2.conf"
-    sed -i "s@^on-download-complete=.*@on-download-complete=${HOOKS_DIR}/clean.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
-    sed -i "s@^on-bt-download-complete=.*@on-bt-download-complete=${HOOKS_DIR}/clean.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
-    sed -i "s@^on-download-stop=.*@on-download-stop=${HOOKS_DIR}/delete.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
-    sed -i "s@^on-download-error=.*@on-download-error=${HOOKS_DIR}/delete.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
-    sed -i "s@^\(rpc-secret=\).*@\1$(date +%s%N | md5sum | head -c 20)@" "${ARIA2_CONF_DIR}/aria2.conf"
-    sed -i "s@^\(dest-dir=\).*@\1${DOWNLOAD_PATH}/completed@" "${ARIA2_CONF_DIR}/script.conf"
+    # 用 awk 整行改写而非 sed: 路径/密钥中可能含 sed 分隔符(@)
+    # 与正则元字符, 实测路径含 @ 时 sed 直接语法错误。
+    rewrite_conf() {
+        local file="$1" key="$2" val="$3"
+        CONF_KEY="${key}" CONF_VAL="${val}" awk \
+            'BEGIN{FS=OFS="="; k=ENVIRON["CONF_KEY"]; v=ENVIRON["CONF_VAL"]}
+             $1==k{$2=v; print; next} {print}' "${file}" >"${file}.tmp" \
+            && mv -f "${file}.tmp" "${file}"
+    }
+    local _conf="${ARIA2_CONF_DIR}/aria2.conf"
+    rewrite_conf "${_conf}" dir "${DOWNLOAD_PATH}"
+    rewrite_conf "${_conf}" log "${ARIA2_CONF_DIR}/aria2.log"
+    rewrite_conf "${_conf}" save-session "${ARIA2_CONF_DIR}/aria2.session"
+    rewrite_conf "${_conf}" on-download-complete "${HOOKS_DIR}/clean.sh"
+    rewrite_conf "${_conf}" on-bt-download-complete "${HOOKS_DIR}/clean.sh"
+    rewrite_conf "${_conf}" on-download-stop "${HOOKS_DIR}/delete.sh"
+    rewrite_conf "${_conf}" on-download-error "${HOOKS_DIR}/delete.sh"
+    rewrite_conf "${_conf}" rpc-secret "$(date +%s%N | md5sum | head -c 20)"
+    rewrite_conf "${ARIA2_CONF_DIR}/script.conf" dest-dir "${DOWNLOAD_PATH}/completed"
+    unset -f rewrite_conf
     # 不再预置 dht.dat / dht6.dat: 它们是 DHT 路由表的运行时数据, aria2 官方
     # 从不分发, 第三方快照来源不可控。aria2 启动后会自行填充路由表并保存到
     # 该路径(需在 aria2.conf 配置 dht-file-path / dht-file-path6)。
@@ -362,7 +373,7 @@ Set_aria2_RPC_passwd() {
         aria2_passwd_1=${aria2_passwd}
     fi
     echo -e "
-${Tip} Aria2 RPC 密钥不要包含等号(=)和井号(#)，留空为随机生成。
+${Tip} 留空为随机生成。密钥可含 =、#、空格等字符，配置读写均按原文处理。
 
  当前 RPC 密钥为: ${Green_font_prefix}${aria2_passwd_1}${Font_color_suffix}
 "
@@ -371,7 +382,7 @@ ${Tip} Aria2 RPC 密钥不要包含等号(=)和井号(#)，留空为随机生成
     [[ -z "${aria2_RPC_passwd}" ]] && aria2_RPC_passwd=$(date +%s%N | md5sum | head -c 20)
     if [[ "${aria2_passwd}" != "${aria2_RPC_passwd}" ]]; then
         if [[ -z "${aria2_passwd}" ]]; then
-            echo -e "\nrpc-secret=${aria2_RPC_passwd}" >>"${ARIA2_CONF_DIR}/aria2.conf"
+            printf '\nrpc-secret=%s\n' "${aria2_RPC_passwd}" >>"${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
                 echo -e "${Info} RPC 密钥修改成功！新密钥为：${Green_font_prefix}${aria2_RPC_passwd}${Font_color_suffix}(配置文件中缺少相关选项参数，已自动加入配置文件底部)"
                 if [[ ${read_123} != "1" ]]; then
@@ -422,7 +433,7 @@ Set_aria2_RPC_port() {
     fi
     if [[ "${aria2_port}" != "${aria2_RPC_port}" ]]; then
         if [[ -z "${aria2_port}" ]]; then
-            echo -e "\nrpc-listen-port=${aria2_RPC_port}" >>"${ARIA2_CONF_DIR}/aria2.conf"
+            printf '\nrpc-listen-port=%s\n' "${aria2_RPC_port}" >>"${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
                 echo -e "${Info} RPC 端口修改成功！新端口为：${Green_font_prefix}${aria2_RPC_port}${Font_color_suffix}(配置文件中缺少相关选项参数，已自动加入配置文件底部)"
                 Del_iptables
@@ -475,7 +486,7 @@ Set_aria2_RPC_dir() {
     echo
     if [[ "${aria2_dir}" != "${aria2_RPC_dir}" ]]; then
         if [[ -z "${aria2_dir}" ]]; then
-            echo -e "\ndir=${aria2_RPC_dir}" >>"${ARIA2_CONF_DIR}/aria2.conf"
+            printf '\ndir=%s\n' "${aria2_RPC_dir}" >>"${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
                 echo -e "${Info} 下载目录修改成功！新位置为：${Green_font_prefix}${aria2_RPC_dir}${Font_color_suffix}(配置文件中缺少相关选项参数，已自动加入配置文件底部)"
                 if [[ ${read_123} != "1" ]]; then
@@ -752,10 +763,14 @@ Add_iptables() {
 }
 
 Del_iptables() {
+    # 卸载或配置文件缺失时端口变量可能为空, 空端口会让 iptables 报
+    # "invalid port/service ''" 噪音, 逐个校验后再删。
+    command -v iptables >/dev/null 2>&1 || return 0
     local del_port=${aria2_port:-${aria2_RPC_port}}
-    iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${del_port} -j ACCEPT 2>/dev/null
-    iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport ${aria2_bt_port} -j ACCEPT 2>/dev/null
-    iptables -D INPUT -m state --state NEW -m udp -p udp --dport ${aria2_dht_port} -j ACCEPT 2>/dev/null
+    [[ -n "${del_port}" ]] && iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport "${del_port}" -j ACCEPT 2>/dev/null
+    [[ -n "${aria2_bt_port}" ]] && iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport "${aria2_bt_port}" -j ACCEPT 2>/dev/null
+    [[ -n "${aria2_dht_port}" ]] && iptables -D INPUT -m state --state NEW -m udp -p udp --dport "${aria2_dht_port}" -j ACCEPT 2>/dev/null
+    return 0
 }
 
 Save_iptables() {
@@ -782,19 +797,32 @@ Set_iptables() {
     fi
 }
 
-# 检查本项目自身的更新(而非上游 P3TERX 项目)。
+# 检查本项目自身的更新。
+# 用 GitHub API 比较最新 commit SHA 与本地 HEAD, 不依赖 README 中的版本字符串
+# (字符串一旦改写就会失效, 实测曾因 README 精简而永久失效)。
 Update_Shell() {
-    sh_new_ver=$(wget -qO- -t1 -T10 "https://raw.githubusercontent.com/The-GO/aria2-pro/main/README.md" 2>/dev/null \
-        | grep -m1 -oE 'aria2-pro v[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    if [[ -z ${sh_new_ver} ]]; then
-        echo -e "${Error} 无法连接 GitHub，检查更新失败 !" && exit 0
-    fi
-    if [[ "${sh_new_ver}" == "${sh_ver}" ]]; then
-        echo -e "${Info} 当前已是最新版本[ ${sh_ver} ]。"
+    local repo="The-GO/aria2-pro"
+    local local_sha remote_sha
+    local_sha="$(git -C "$(dirname "${BASH_SOURCE[0]}")/.." rev-parse HEAD 2>/dev/null || true)"
+    if [[ -z "${local_sha}" ]]; then
+        echo -e "${Error} 当前不是 git 仓库, 无法比对版本。"
+        echo -e "${Tip} 请手动执行: git pull && bash install.sh"
+        echo -e "${Tip} 项目地址: ${REPO_URL}"
         exit 0
     fi
-    echo -e "${Info} 发现新版本[ ${sh_new_ver} ]，当前版本[ ${sh_ver} ]。"
-    echo -e "${Tip} 请拉取最新代码后重新运行 install.sh:"
+    remote_sha="$(wget -t2 -T10 -qO- "https://api.github.com/repos/${repo}/commits/main" 2>/dev/null \
+        | grep -o '"sha": *"[0-9a-f]\{40\}"' | head -n 1 | grep -o '[0-9a-f]\{40\}')"
+    if [[ -z "${remote_sha}" ]]; then
+        echo -e "${Error} 无法连接 GitHub API，检查更新失败 !"
+        echo -e "${Tip} 可手动执行: git pull && bash install.sh"
+        exit 0
+    fi
+    if [[ "${remote_sha}" == "${local_sha}" ]]; then
+        echo -e "${Info} 当前已是最新版本 (${local_sha:0:7})."
+        exit 0
+    fi
+    echo -e "${Info} 发现新版本 (本地 ${local_sha:0:7} → 远程 ${remote_sha:0:7})."
+    echo -e "${Tip} 更新方式: cd 到 aria2-pro 目录后执行"
     echo -e "  git pull && bash install.sh"
     echo -e "${Tip} 项目地址: ${REPO_URL}"
     exit 0

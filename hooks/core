@@ -80,7 +80,10 @@ readonly WARNING="[${YELLOW_FONT_PREFIX}WARNING${FONT_COLOR_SUFFIX}]"
 require_path() {
     local p="$1" what="${2:-path}"
     if [[ -z "${p}" || "${p}" == "/" || "${p}" == "." ]]; then
-        echo -e "$(date_time) ${ERROR} Refusing to operate on unsafe ${what}: '${p}'" >&2
+        # printf %s 而非 echo -e: 后者会把路径中的 \t \n 当转义符解析,
+        # 日志显示的路径与实际不符, 排查时会误导。
+        printf '%s %s Refusing to operate on unsafe %s: %s\n' \
+            "$(date_time)" "${ERROR}" "${what}" "'${p}'" >&2
         return 1
     fi
     return 0

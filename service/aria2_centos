@@ -14,9 +14,11 @@
 
 NAME="aria2"
 NAME_BIN="aria2c"
-ARIA2C="/usr/local/bin/aria2c"
-CONFIG="/root/.aria2/aria2.conf"
-LOG="/root/.aria2/aria2.log"
+# 路径可用环境变量覆盖, 默认值与 install.sh 一致(/root/.aria2)。
+# install.sh 用 --conf-dir 装非默认路径时会改写这三行。
+ARIA2C="${ARIA2C_BIN:-/usr/local/bin/aria2c}"
+CONFIG="${ARIA2_CONF:-${ARIA2_CONF_DIR:-/root/.aria2}/aria2.conf}"
+LOG="${ARIA2_LOG:-${ARIA2_CONF_DIR:-/root/.aria2}/aria2.log}"
 PID=""
 
 Green_font_prefix="\033[32m"

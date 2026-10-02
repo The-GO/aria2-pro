@@ -31,7 +31,8 @@ while [[ $# -gt 0 ]]; do
         --downloads)    DOWNLOAD_PATH="$2"; shift 2 ;;
         --aria2c)       ARIA2C="$2"; shift 2 ;;
         -h|--help)
-            grep '^#' "$0" | sed 's/^# \{0,1\}//'
+            # 只输出文件头的使用说明(前 12 行), 不要把内部注释一并打出来
+            sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *)
             echo "未知参数: $1" >&2; exit 2 ;;
@@ -137,21 +138,31 @@ install -m 0644 "${INSTALL_SRC}/conf/aria2.conf" \
 install -m 0755 "${INSTALL_SRC}"/hooks/*.sh "${ARIA2_CONF_DIR}/hooks/"
 install -m 0644 "${INSTALL_SRC}/hooks/core" "${ARIA2_CONF_DIR}/hooks/core"
 
-# 按用户参数改写配置
-sed -i "s@^\(dir=\).*@\1${DOWNLOAD_PATH}@" "${ARIA2_CONF_DIR}/aria2.conf"
-sed -i "s@^\(log=\).*@\1${ARIA2_CONF_DIR}/aria2.log@" "${ARIA2_CONF_DIR}/aria2.conf"
-sed -i "s@^\(save-session=\).*@\1${ARIA2_CONF_DIR}/aria2.session@" "${ARIA2_CONF_DIR}/aria2.conf"
-sed -i "s@^on-download-complete=.*@on-download-complete=${ARIA2_CONF_DIR}/hooks/clean.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
-sed -i "s@^on-bt-download-complete=.*@on-bt-download-complete=${ARIA2_CONF_DIR}/hooks/clean.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
-sed -i "s@^on-download-stop=.*@on-download-stop=${ARIA2_CONF_DIR}/hooks/delete.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
-sed -i "s@^on-download-error=.*@on-download-error=${ARIA2_CONF_DIR}/hooks/delete.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
-sed -i "s@^\(dest-dir=\).*@\1${DOWNLOAD_PATH}/completed@" "${ARIA2_CONF_DIR}/script.conf"
+# 按用户参数改写配置。
+# 用 awk + ENVIRON 而非 sed: 路径中可能含 sed 分隔符(@ | 等)与正则元字符,
+# 实测路径含 @ 时 sed 直接语法错误; awk 按整行重写则完全不受影响。
+rewrite_conf() {
+    local file="$1" key="$2" val="$3"
+    CONF_KEY="${key}" CONF_VAL="${val}" awk \
+        'BEGIN{FS=OFS="="; k=ENVIRON["CONF_KEY"]; v=ENVIRON["CONF_VAL"]}
+         $1==k{$2=v; print; next} {print}' "${file}" >"${file}.tmp" \
+        && mv -f "${file}.tmp" "${file}"
+}
+CONF="${ARIA2_CONF_DIR}/aria2.conf"
+rewrite_conf "${CONF}" dir "${DOWNLOAD_PATH}"
+rewrite_conf "${CONF}" log "${ARIA2_CONF_DIR}/aria2.log"
+rewrite_conf "${CONF}" save-session "${ARIA2_CONF_DIR}/aria2.session"
+rewrite_conf "${CONF}" on-download-complete "${ARIA2_CONF_DIR}/hooks/clean.sh"
+rewrite_conf "${CONF}" on-bt-download-complete "${ARIA2_CONF_DIR}/hooks/clean.sh"
+rewrite_conf "${CONF}" on-download-stop "${ARIA2_CONF_DIR}/hooks/delete.sh"
+rewrite_conf "${CONF}" on-download-error "${ARIA2_CONF_DIR}/hooks/delete.sh"
+rewrite_conf "${ARIA2_CONF_DIR}/script.conf" dest-dir "${DOWNLOAD_PATH}/completed"
 
 # RPC 密钥: 保留已有值, 首次安装则随机生成
-if grep -q '^rpc-secret=' "${ARIA2_CONF_DIR}/aria2.conf"; then
-    cur="$(grep '^rpc-secret=' "${ARIA2_CONF_DIR}/aria2.conf" | cut -d= -f2)"
+if grep -q '^rpc-secret=' "${CONF}"; then
+    cur="$(grep '^rpc-secret=' "${CONF}" | cut -d= -f2-)"
     if [[ "${cur}" == "changeme" || -z "${cur}" ]]; then
-        sed -i "s@^\(rpc-secret=\).*@\1$(date +%s%N | md5sum | head -c 20)@" "${ARIA2_CONF_DIR}/aria2.conf"
+        rewrite_conf "${CONF}" rpc-secret "$(date +%s%N | md5sum | head -c 20)"
         info "已生成随机 RPC 密钥"
     else
         info "保留现有 RPC 密钥"
@@ -169,6 +180,15 @@ mkdir -p "${DOWNLOAD_PATH}" "${DOWNLOAD_PATH}/completed"
 touch "${ARIA2_CONF_DIR}/aria2.session"
 
 # ---- init.d 服务 ----------------------------------------------------------
+# 整行改写 init.d 中的 KEY="..." (KEY 必须顶格, 不带前导空格)
+rewrite_initd() {
+    local file="$1" key="$2" val="$3"
+    # init.d 里形如 KEY="value", 这里负责补上双引号
+    ID_KEY="${key}" ID_VAL="${val}" awk \
+        'BEGIN{FS=OFS="="; k=ENVIRON["ID_KEY"]; v=ENVIRON["ID_VAL"]}
+         $1==k{$2="\"" v "\""; print; next} {print}' "${file}" >"${file}.tmp" \
+        && mv -f "${file}.tmp" "${file}"
+}
 # 安装 init.d 并按实际路径改写 CONFIG/LOG/ARIA2C(脚本内默认值是 /root/.aria2,
 # 用户用 --conf-dir 指定别处时必须同步, 否则服务会指向不存在的配置)。
 install_initd() {
@@ -179,12 +199,10 @@ install_initd() {
     fi
     install -m 0755 "${src}" "${dst}"
     # 按实际安装路径改写这三行(脚本内默认 /root/.aria2)。
-    # 整行替换而非 sed 捕获组, 避免路径中的特殊字符干扰。
-    sed -i \
-        -e "s|^ARIA2C=.*|ARIA2C=\"${ARIA2C}\"|" \
-        -e "s|^CONFIG=.*|CONFIG=\"${ARIA2_CONF_DIR}/aria2.conf\"|" \
-        -e "s|^LOG=.*|LOG=\"${ARIA2_CONF_DIR}/aria2.log\"|" \
-        "${dst}"
+    # 同样用 awk 整行重写, 避免路径中的 | 或 @ 破坏 sed 分隔符。
+    rewrite_initd "${dst}" ARIA2C "${ARIA2C}"
+    rewrite_initd "${dst}" CONFIG "${ARIA2_CONF_DIR}/aria2.conf"
+    rewrite_initd "${dst}" LOG "${ARIA2_CONF_DIR}/aria2.log"
     return 0
 }
 
@@ -220,8 +238,15 @@ UNIT_EOF
     info "已安装 systemd 单元: ${UNIT}"
 else
     # 无 systemd: 安装项目自带的 init.d 脚本(已内置全部修复)
-    install_initd "${INSTALL_SRC}/service/aria2_debian"
-    update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
+    # CentOS 用 aria2_centos(chkconfig 注册), 其余用 aria2_debian。
+    if [[ ${release} == "centos" ]]; then
+        install_initd "${INSTALL_SRC}/service/aria2_centos"
+        chkconfig --add aria2 >/dev/null 2>&1 || true
+        chkconfig aria2 on >/dev/null 2>&1 || true
+    else
+        install_initd "${INSTALL_SRC}/service/aria2_debian"
+        update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
+    fi
     info "已安装 init.d 脚本"
 fi
 
