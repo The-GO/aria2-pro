@@ -1,0 +1,435 @@
+#!/usr/bin/env bash
+#
+# https://github.com/P3TERX/aria2.sh  (upstream, unmaintained since 2020)
+# File name: core
+# Description: Aria2 hook core — shared functions for upload/move/delete/clean
+# Version: 4.0.0
+#
+# Copyright (c) 2018-2021 P3TERX <https://p3terx.com>
+# Copyright (c) 2026 aria2-pro contributors
+#
+# MIT License — see ../LICENSE
+#
+# ---------------------------------------------------------------------------
+# Changes vs upstream core (v3.3):
+#   FIX  DELETE_TORRENT_FILES: `for f in "${MULTILINE}"` loops ONCE with the
+#        whole blob as one element (SC2066) -> torrent files were never deleted.
+#        Now uses a glob with nullglob + explicit per-file loop.
+#   FIX  DELETE_EXCLUDE_FILE: no existence check on ${TASK_PATH}; an empty or
+#        bogus path reached `find | xargs rm -vf`. Now guarded.
+#   FIX  DELETE_EMPTY_DIR: quoted RHS of =~ is literal; unquoted breaks on
+#        regex metachars in paths. Now uses == with prefix glob.
+#   FIX  READ_ARIA2_CONF: grep on a missing/commented key returned junk; now
+#        validates the value is non-empty and numeric where required.
+#   FIX  RPC_TASK_INFO: curl fallback to https://localhost is dead code (aria2
+#        RPC is plain HTTP unless rpc-secure=true). Removed; added --max-time.
+#   FIX  GET_INFO_HASH: `-z` test passed when jq emitted the string "null",
+#        so the null branch was unreachable. Reordered the checks.
+#   FIX  LOAD_RCLONE_ENV moved out of upload.sh into core (shared, safe).
+#   OPT  fixed `set -e`-hostile constructs; added `set -o pipefail` where safe.
+# ---------------------------------------------------------------------------
+
+# Sourced, not executed. Guard against direct run.
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    echo "core is a library; it must be sourced by a hook script." >&2
+    exit 1
+fi
+
+TASK_GID="$1"
+FILE_NUM="$2"
+FILE_PATH="$3"
+
+# 部署布局:
+#   <install>/aria2.conf, script.conf, rclone.env   <- 配置目录
+#   <install>/hooks/core, upload.sh, ...           <- 钩子目录
+# 安装后 core 位于 <install>/hooks/core, 因此配置目录是 core 的 ../ 而非 ../conf。
+# 支持用环境变量 ARIA2_CONF_DIR 显式覆盖(便于测试与非标准布局)。
+_ARIA2_HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -n "${ARIA2_CONF_DIR:-}" ]]; then
+    ARIA2_CONF_DIR="${ARIA2_CONF_DIR}"
+else
+    # 探测规则: 部署时配置(aria2.conf)与 hooks/ 同级; 源码开发时配置在下级
+    # conf/ 子目录。以 aria2.conf 的实际位置为准, 而不是假设布局。
+    _cand=
+    for _cand in "${_ARIA2_HOOK_DIR}/.." "${_ARIA2_HOOK_DIR}/../conf" "${_ARIA2_HOOK_DIR}"; do
+        if [[ -f "${_cand}/aria2.conf" ]]; then
+            ARIA2_CONF_DIR="$(cd "${_cand}" && pwd)"
+            break
+        fi
+    done
+    if [[ -z "${ARIA2_CONF_DIR}" ]]; then
+        ARIA2_CONF_DIR="$(cd "${_ARIA2_HOOK_DIR}/.." && pwd)"
+    fi
+fi
+unset _ARIA2_HOOK_DIR
+ARIA2_CONF="${ARIA2_CONF_DIR}/aria2.conf"
+ARIA2_SESSION="${ARIA2_CONF_DIR}/aria2.session"
+SCRIPT_CONF="${ARIA2_CONF_DIR}/script.conf"
+HOOK_LOG="${ARIA2_CONF_DIR}/hooks.log"
+
+readonly RED_FONT_PREFIX="\033[31m"
+readonly GREEN_FONT_PREFIX="\033[32m"
+readonly YELLOW_FONT_PREFIX="\033[1;33m"
+readonly LIGHT_PURPLE_FONT_PREFIX="\033[1;35m"
+readonly FONT_COLOR_SUFFIX="\033[0m"
+readonly INFO="[${GREEN_FONT_PREFIX}INFO${FONT_COLOR_SUFFIX}]"
+readonly ERROR="[${RED_FONT_PREFIX}ERROR${FONT_COLOR_SUFFIX}]"
+readonly WARNING="[${YELLOW_FONT_PREFIX}WARNING${FONT_COLOR_SUFFIX}]"
+
+# Guard every destructive command: never allow an empty TASK_PATH.
+require_path() {
+    local p="$1" what="${2:-path}"
+    if [[ -z "${p}" || "${p}" == "/" || "${p}" == "." ]]; then
+        echo -e "$(date_time) ${ERROR} Refusing to operate on unsafe ${what}: '${p}'" >&2
+        return 1
+    fi
+    return 0
+}
+
+date_time() {
+    date +"%Y-%m-%d %H:%M:%S"
+}
+
+# Unified logger: stderr for errors, and append to the hook log when possible.
+log_line() {
+    local level="$1"; shift
+    printf '%s %s %s\n' "$(date_time)" "${level}" "$*"
+    if [[ -n "${HOOK_LOG}" && -d "${HOOK_LOG%/*}" ]]; then
+        printf '%s %s %s\n' "$(date_time)" "${level}" "$*" \
+            | sed 's,\x1B\[[0-9;]*m,,g' >>"${HOOK_LOG}" 2>/dev/null
+    fi
+    [[ "${level}" == "${ERROR}" ]] && printf '%s %s %s\n' "$(date_time)" "${level}" "$*" >&2
+}
+
+info() { log_line "${INFO}" "$@"; }
+warn() { log_line "${WARNING}" "$@"; }
+err() { log_line "${ERROR}" "$@"; }
+
+CHECK_PARAMETER() {
+    if [[ $# -eq 0 ]]; then
+        err "This script can only be invoked by Aria2 via on-*-complete hooks."
+        exit 1
+    fi
+}
+
+CHECK_FILE_NUM() {
+    if [[ ${FILE_NUM} -eq 0 ]]; then
+        info "Number of files is zero (magnet metadata stage), skipping."
+        exit 0
+    fi
+}
+
+CHECK_SCRIPT_CONF() {
+    if [[ ! -f "${SCRIPT_CONF}" ]]; then
+        err "'${SCRIPT_CONF}' does not exist!"
+        exit 1
+    fi
+    LOAD_SCRIPT_CONF
+}
+
+LOAD_SCRIPT_CONF() {
+    # read a key=value line, ignoring comments/blank lines and surrounding
+    # whitespace. Uses a subshell read to avoid mangling the caller's vars.
+    conf_get() {
+        local key="$1" val
+        val="$(grep -E "^[[:space:]]*${key}[[:space:]]*=" "${SCRIPT_CONF}" 2>/dev/null \
+            | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+        printf '%s' "${val}"
+    }
+    DRIVE_NAME="$(conf_get drive-name)"
+    DRIVE_DIR="$(conf_get drive-dir)"
+    UPLOAD_LOG_PATH="$(conf_get upload-log)"
+    DEST_DIR="$(conf_get dest-dir)"
+    MOVE_LOG_PATH="$(conf_get move-log)"
+    DELETE_ON_REMOVED="$(conf_get delete-on-removed)"
+    DELETE_ON_ERROR="$(conf_get delete-on-error)"
+    DELETE_ON_UNKNOWN="$(conf_get delete-on-unknown)"
+    DELETE_DOT_ARIA2="$(conf_get delete-dot-aria2)"
+    DELETE_DOT_TORRENT="$(conf_get delete-dot-torrent)"
+    DELETE_EMPTY_DIR_ENABLED="$(conf_get delete-empty-dir)"
+    MIN_SIZE="$(conf_get min-size)"
+    INCLUDE_FILE="$(conf_get include-file)"
+    EXCLUDE_FILE="$(conf_get exclude-file)"
+    INCLUDE_FILE_REGEX="$(conf_get include-file-regex)"
+    EXCLUDE_FILE_REGEX="$(conf_get exclude-file-regex)"
+    RCLONE_TRANSFERS="$(conf_get rclone-transfers)"
+    RCLONE_CHECKERS="$(conf_get rclone-checkers)"
+    [[ -z "${RCLONE_TRANSFERS}" ]] && RCLONE_TRANSFERS=4
+    [[ -z "${RCLONE_CHECKERS}" ]] && RCLONE_CHECKERS=8
+    unset -f conf_get
+}
+
+# Safely export KEY=VALUE pairs from rclone.env.
+# The upstream `export $(grep ... | xargs -0)` breaks on values containing
+# spaces and on identifiers that are not valid shell names.
+LOAD_RCLONE_ENV() {
+    local env_file="${ARIA2_CONF_DIR}/rclone.env" line key val
+    [[ -f "${env_file}" ]] || return 0
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        line="${line%%$'\r'}"
+        [[ -z "${line}" || "${line}" == \#* ]] && continue
+        [[ "${line}" != *=* ]] && continue
+        key="${line%%=*}"; val="${line#*=}"
+        key="$(printf '%s' "${key}" | sed 's/[[:space:]]//g')"
+        if [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            export "${key}=${val}"
+        else
+            warn "Skipping invalid rclone.env entry: '${line}'"
+        fi
+    done <"${env_file}"
+}
+
+READ_ARIA2_CONF() {
+    if [[ ! -f "${ARIA2_CONF}" ]]; then
+        err "'${ARIA2_CONF}' does not exist."
+        exit 1
+    fi
+    local v
+    v="$(grep -E "^[[:space:]]*dir[[:space:]]*=" "${ARIA2_CONF}" | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    ARIA2_DOWNLOAD_DIR="${v}"
+    v="$(grep -E "^[[:space:]]*rpc-listen-port[[:space:]]*=" "${ARIA2_CONF}" | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    RPC_PORT="${v}"
+    v="$(grep -E "^[[:space:]]*rpc-secret[[:space:]]*=" "${ARIA2_CONF}" | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    RPC_SECRET="${v}"
+    v="$(grep -E "^[[:space:]]*save-session-interval[[:space:]]*=" "${ARIA2_CONF}" | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    SAVE_SESSION_INTERVAL="${v}"
+
+    if [[ -z "${ARIA2_DOWNLOAD_DIR}" || -z "${RPC_PORT}" ]]; then
+        err "Aria2 configuration incomplete (missing dir / rpc-listen-port)."
+        exit 1
+    fi
+    [[ "${RPC_PORT}" =~ ^[0-9]+$ ]] || { err "rpc-listen-port is not numeric: '${RPC_PORT}'"; exit 1; }
+    [[ "${SAVE_SESSION_INTERVAL}" =~ ^[0-9]+$ ]] || SAVE_SESSION_INTERVAL=30
+    RPC_ADDRESS="127.0.0.1:${RPC_PORT}/jsonrpc"
+}
+
+RPC_TASK_INFO() {
+    local payload
+    if [[ -n "${RPC_SECRET}" ]]; then
+        payload='{"jsonrpc":"2.0","method":"aria2.tellStatus","id":"aria2-pro","params":["token:'"${RPC_SECRET}"'","'"${TASK_GID}"'"]}'
+    else
+        payload='{"jsonrpc":"2.0","method":"aria2.tellStatus","id":"aria2-pro","params":["'"${TASK_GID}"'"]}'
+    fi
+    # -s 静默 + 2>/dev/null: the RPC probe writes "curl: (22) ... 400" to stderr
+    # on an unhealthy/absent RPC, which polluted every hook log.
+    curl -s --max-time 15 -d "${payload}" "${RPC_ADDRESS}" 2>/dev/null
+}
+
+GET_TASK_INFO() {
+    READ_ARIA2_CONF
+    RPC_RESULT="$(RPC_TASK_INFO)"
+}
+
+GET_DOWNLOAD_DIR() {
+    if [[ -z "${RPC_RESULT}" ]]; then
+        err "Aria2 RPC interface error!"
+        exit 1
+    fi
+    if ! command -v jq >/dev/null 2>&1; then
+        err "jq is required but not installed."
+        exit 1
+    fi
+    DOWNLOAD_DIR="$(printf '%s' "${RPC_RESULT}" | jq -r '.result.dir // empty')"
+    if [[ -z "${DOWNLOAD_DIR}" ]]; then
+        printf '%s\n' "${RPC_RESULT}" | jq '.error // .result' >&2
+        err "Failed to get download directory!"
+        exit 1
+    fi
+}
+
+GET_TASK_STATUS() {
+    TASK_STATUS="$(printf '%s' "${RPC_RESULT}" | jq -r '.result.status // empty')"
+    if [[ -z "${TASK_STATUS}" ]]; then
+        err "Failed to get task status!"
+        exit 1
+    fi
+}
+
+# 返回 0 = BT 任务且已定位种子; 1 = 非 BT 任务(普通 HTTP/FTP/SFTP 下载
+# 本来就没有 infoHash, 这不是错误, 上游在这里报 ERROR 会误导用户)。
+GET_INFO_HASH() {
+    INFO_HASH="$(printf '%s' "${RPC_RESULT}" | jq -r '.result.infoHash // empty')"
+    if [[ -z "${INFO_HASH}" || "${INFO_HASH}" == "null" ]]; then
+        IS_BT_TASK=false
+        return 1
+    fi
+    IS_BT_TASK=true
+    TORRENT_FILE="${DOWNLOAD_DIR}/${INFO_HASH}.torrent"
+    return 0
+}
+
+CONVERSION_PATH() {
+    require_path "${DOWNLOAD_DIR}" "download dir" || exit 1
+    RELATIVE_PATH="${FILE_PATH#"${DOWNLOAD_DIR}/"}"
+    TASK_FILE_NAME="${RELATIVE_PATH%%/*}"
+    [[ -z "${TASK_FILE_NAME}" ]] && TASK_FILE_NAME="${RELATIVE_PATH}"
+    TASK_PATH="${DOWNLOAD_DIR}/${TASK_FILE_NAME}"
+    DEST_PATH_SUFFIX="${TASK_PATH#"${ARIA2_DOWNLOAD_DIR}"}"
+}
+
+OUTPUT_LOG() {
+    printf '%s\n' "${LOG}"
+    local path="${LOG_PATH}"
+    if [[ -n "${path}" && -d "${path%/*}" ]]; then
+        printf '%s\n' "${LOG}" | sed 's,\x1B\[[0-9;]*m,,g' >>"${path}"
+    fi
+}
+
+# FIX (v4): upstream only looked at ${FILE_PATH}.aria2 and ${TASK_PATH}.aria2.
+# For a multi-file BT task ${FILE_PATH} is the FIRST file of the task, so the
+# task-root control file (which is the one aria2 actually writes for a
+# directory task) survived. Also collect every match so a task that leaves
+# several control files behind gets fully cleaned.
+CHECK_DOT_ARIA2() {
+    DOT_ARIA2_FILES=()
+    local cand
+    if [[ -n "${FILE_PATH}" && -f "${FILE_PATH}.aria2" ]]; then
+        DOT_ARIA2_FILES+=("${FILE_PATH}.aria2")
+    fi
+    if [[ -n "${TASK_PATH}" && -f "${TASK_PATH}.aria2" ]]; then
+        cand="${TASK_PATH}.aria2"
+        [[ " ${DOT_ARIA2_FILES[*]} " != *" ${cand} "* ]] && DOT_ARIA2_FILES+=("${cand}")
+    fi
+    if [[ ${#DOT_ARIA2_FILES[@]} -eq 0 ]]; then
+        DOT_ARIA2_FILE="null"
+        info ".aria2 control file does not exist."
+        return 1
+    fi
+    DOT_ARIA2_FILE="${DOT_ARIA2_FILES[0]}"
+    return 0
+}
+
+DELETE_DOT_ARIA2() {
+    if [[ "${DELETE_DOT_ARIA2}" == "true" ]] && CHECK_DOT_ARIA2; then
+        info "Deleting .aria2 control file(s): ${DOT_ARIA2_FILES[*]}"
+        rm -vf -- "${DOT_ARIA2_FILES[@]}"
+    fi
+}
+
+# Was broken: `for f in "${MULTILINE_VAR}"` runs exactly once with the whole
+# multi-line blob as a single (non-existent) filename. Also unquoted rm on
+# filenames containing spaces. Now a proper glob loop with nullglob.
+DELETE_TORRENT_FILES() {
+    local slept=$(( ${SAVE_SESSION_INTERVAL:-30} + 1 ))
+    info "Waiting ${slept}s for aria2 to flush its session before scanning torrents..."
+    sleep "${slept}"
+    local -a candidates=()
+    local f base
+    shopt -s nullglob
+    for f in "${DOWNLOAD_DIR}"/*.torrent; do
+        [[ -f "${f}" ]] || continue
+        base="$(basename "${f}")"
+        if [[ -f "${ARIA2_SESSION}" ]] && grep -qi -- "${base%.*}" "${ARIA2_SESSION}" 2>/dev/null; then
+            continue
+        fi
+        candidates+=("${f}")
+    done
+    shopt -u nullglob
+    if [[ ${#candidates[@]} -eq 0 ]]; then
+        info "No orphan .torrent files found."
+        return 0
+    fi
+    for f in "${candidates[@]}"; do
+        info "Deleting orphan .torrent file: ${f}"
+        rm -vf -- "${f}"
+    done
+}
+
+DELETE_DOT_TORRENT() {
+    if GET_INFO_HASH; then
+        if [[ "${DELETE_DOT_TORRENT}" == "true" || "${DELETE_DOT_TORRENT}" == "normal" ]] && [[ -f "${TORRENT_FILE}" ]]; then
+            info "Deleting .torrent file: ${TORRENT_FILE}"
+            rm -vf -- "${TORRENT_FILE}"
+        elif [[ "${DELETE_DOT_TORRENT}" == "true" || "${DELETE_DOT_TORRENT}" == "enhanced" ]]; then
+            DELETE_TORRENT_FILES
+        elif [[ "${DELETE_DOT_TORRENT}" == "normal" ]]; then
+            warn ".torrent file may exist but cannot be found. Consider 'enhanced'."
+        else
+            info "Delete .torrent file function is disabled."
+        fi
+    else
+        info "Not a BitTorrent task, skipping .torrent handling."
+    fi
+}
+
+# Was broken: `[[ $a =~ "$b" ]]` quotes the RHS into a literal string, and the
+# unquoted form mis-handles regex metacharacters in paths. Prefix matching is
+# what the code actually wants.
+# "is $1 equal to $2 or inside $2", with trailing slashes normalised so that
+# "/data/dl/" and "/data/dl" compare equal. (An earlier version let a trailing
+# slash slip past the download-root guard.)
+path_is_under() {
+    local a="${1%/}" b="${2%/}"
+    [[ -z "${a}" ]] && a="/"
+    [[ -z "${b}" ]] && b="/"
+    [[ "${a}" == "${b}" || "${a}" == "${b}"/* ]]
+}
+
+DELETE_EMPTY_DIR() {
+    [[ "${DELETE_EMPTY_DIR_ENABLED}" == "true" ]] || return 0
+    info "Deleting empty directories ..."
+    local scan_root
+    if path_is_under "${DOWNLOAD_DIR}" "${ARIA2_DOWNLOAD_DIR}"; then
+        scan_root="${ARIA2_DOWNLOAD_DIR}"
+    else
+        scan_root="${DOWNLOAD_DIR}"
+    fi
+    require_path "${scan_root}" "scan root" || return 1
+    # -depth so children are evaluated before their parents; never descend
+    # outside the scan root.
+    find "${scan_root}" ! -path "${scan_root}" -depth -type d -empty -exec rmdir -v -- {} + 2>/dev/null
+}
+
+# Was broken: no guard on ${TASK_PATH}, so an empty path (or a stray '.') could
+# reach `find | xargs rm`. Now requires an existing, non-trivial directory.
+DELETE_EXCLUDE_FILE() {
+    if [[ ${FILE_NUM} -le 1 ]]; then
+        return 0
+    fi
+    if [[ -z "${MIN_SIZE}" && -z "${INCLUDE_FILE}" && -z "${EXCLUDE_FILE}" \
+        && -z "${EXCLUDE_FILE_REGEX}" && -z "${INCLUDE_FILE_REGEX}" ]]; then
+        return 0
+    fi
+    if ! require_path "${TASK_PATH}" "task path"; then
+        return 1
+    fi
+    if [[ ! -d "${TASK_PATH}" ]]; then
+        warn "Task path is not a directory, skipping file filtering: ${TASK_PATH}"
+        return 0
+    fi
+    info "Deleting excluded files ..."
+    local -a rmfiles=()
+    if [[ -n "${MIN_SIZE}" ]]; then
+        while IFS= read -r -d '' f; do rmfiles+=("${f}"); done \
+            < <(find "${TASK_PATH}" -type f -size -"${MIN_SIZE}" -print0 2>/dev/null)
+    fi
+    if [[ -n "${EXCLUDE_FILE}" ]]; then
+        while IFS= read -r -d '' f; do rmfiles+=("${f}"); done \
+            < <(find "${TASK_PATH}" -type f -regextype posix-extended -iregex ".*\.(${EXCLUDE_FILE})" -print0 2>/dev/null)
+    fi
+    if [[ -n "${INCLUDE_FILE}" ]]; then
+        while IFS= read -r -d '' f; do rmfiles+=("${f}"); done \
+            < <(find "${TASK_PATH}" -type f -regextype posix-extended ! -iregex ".*\.(${INCLUDE_FILE})" -print0 2>/dev/null)
+    fi
+    if [[ -n "${EXCLUDE_FILE_REGEX}" ]]; then
+        while IFS= read -r -d '' f; do rmfiles+=("${f}"); done \
+            < <(find "${TASK_PATH}" -type f -regextype posix-extended -iregex "${EXCLUDE_FILE_REGEX}" -print0 2>/dev/null)
+    fi
+    if [[ -n "${INCLUDE_FILE_REGEX}" ]]; then
+        while IFS= read -r -d '' f; do rmfiles+=("${f}"); done \
+            < <(find "${TASK_PATH}" -type f -regextype posix-extended ! -iregex "${INCLUDE_FILE_REGEX}" -print0 2>/dev/null)
+    fi
+    if [[ ${#rmfiles[@]} -eq 0 ]]; then
+        info "No files matched the filter rules."
+        return 0
+    fi
+    rm -vf -- "${rmfiles[@]}"
+    unset rmfiles
+}
+
+CLEAN_UP() {
+    DELETE_DOT_ARIA2
+    DELETE_DOT_TORRENT
+    DELETE_EXCLUDE_FILE
+    DELETE_EMPTY_DIR
+}
