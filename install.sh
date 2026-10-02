@@ -136,11 +136,6 @@ fi
 info "部署配置到 ${ARIA2_CONF_DIR}"
 mkdir -p "${ARIA2_CONF_DIR}/hooks"
 
-# 已有配置先备份
-for f in aria2.conf script.conf; do
-    [[ -f "${ARIA2_CONF_DIR}/${f}" && ! -f "${ARIA2_CONF_DIR}/${f}.orig" ]] && cp -a "${ARIA2_CONF_DIR}/${f}" "${ARIA2_CONF_DIR}/${f}.orig"
-done
-
 install -m 0644 "${INSTALL_SRC}/conf/aria2.conf" \
                 "${INSTALL_SRC}/conf/script.conf" \
                 "${INSTALL_SRC}/conf/rclone.env" "${ARIA2_CONF_DIR}/"

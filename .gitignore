@@ -1,7 +1,6 @@
 # 安装时生成的本地数据(不应进仓库)
 *.log
 *.session
-*.orig
 *.bak
 *.bak.*
 dht.dat

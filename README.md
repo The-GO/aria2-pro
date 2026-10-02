@@ -46,8 +46,6 @@ grep -E "on-download-complete|on-download-stop" /root/.aria2/aria2.conf
 tail -5 /root/.aria2/aria2.log                            # 应无 Unknown option / Parse error
 ```
 
-从旧版 P3TERX 脚本迁移：先用旧脚本卸载（选 3），再运行 `install.sh`。旧配置会备份为 `.orig`。
-
 ---
 
 ## 使用
