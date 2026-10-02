@@ -113,6 +113,12 @@ CHECK_PARAMETER() {
 }
 
 CHECK_FILE_NUM() {
+    # 空串/非数字要报错, 不能裸 [[ -eq ]]: 空串在算术上下文会被当 0,
+    # 于是"参数没传对"会被伪装成 magnet metadata stage 而静默跳过。
+    if [[ ! "${FILE_NUM}" =~ ^[0-9]+$ ]]; then
+        err "Invalid FILE_NUM: '${FILE_NUM}' (expected a non-negative integer)."
+        exit 1
+    fi
     if [[ ${FILE_NUM} -eq 0 ]]; then
         info "Number of files is zero (magnet metadata stage), skipping."
         exit 0

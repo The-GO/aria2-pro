@@ -20,17 +20,29 @@ source "$(dirname "${BASH_SOURCE[0]}")/core"
 CHECK_CORE_FILE() { :; }
 
 DEFINITION_PATH() {
-    SOURCE_PATH="${TASK_PATH}"
-    if [[ -n "${DEST_DIR}" ]] && [[ "${DOWNLOAD_DIR}" != "${ARIA2_DOWNLOAD_DIR}" ]] \
-        && path_is_under "${DOWNLOAD_DIR}" "${ARIA2_DOWNLOAD_DIR}"; then
-        DEST_PATH="${DEST_DIR}${DEST_PATH_SUFFIX%/*}"
-    else
-        DEST_PATH="${DEST_DIR}"
-    fi
-    [[ -z "${DEST_DIR}" ]] && {
+    # 先校验再使用: 原实现在用过 ${DEST_DIR} 之后才检查它为空。
+    require_path "${TASK_PATH}" "source task path" || exit 1
+    if [[ -z "${DEST_DIR}" ]]; then
         err "dest-dir is not set in script.conf."
         exit 1
-    }
+    fi
+    # 目标不能包含源本身, 否则 mv 会把数据移回下载目录
+    if path_is_under "${TASK_PATH}" "${DEST_DIR%/}"; then
+        err "Refusing to move: destination '${DEST_DIR}' contains the source '${TASK_PATH}'."
+        exit 1
+    fi
+    SOURCE_PATH="${TASK_PATH}"
+    local dest_dir="${DEST_DIR%/}"
+    if [[ "${DOWNLOAD_DIR}" != "${ARIA2_DOWNLOAD_DIR}" ]] \
+        && path_is_under "${DOWNLOAD_DIR}" "${ARIA2_DOWNLOAD_DIR}"; then
+        DEST_PATH="${dest_dir}${DEST_PATH_SUFFIX%/*}"
+        # 空后缀时塌缩为 dest_dir 本身
+        if [[ -z "${DEST_PATH_SUFFIX}" || "${DEST_PATH_SUFFIX}" == "/" ]]; then
+            DEST_PATH="${dest_dir}"
+        fi
+    else
+        DEST_PATH="${dest_dir}"
+    fi
 }
 
 TASK_INFO() {

@@ -48,13 +48,14 @@ if [[ "${1:-}" == "--test" || "${1:-}" == "-t" ]]; then
     echo "各 tracker 源测速:"
     printf '%-62s %-6s %-8s %s\n' "URL" "HTTP" "耗时" "条数"
     for u in "${TRACKER_SOURCES[@]}"; do
-        m="$(curl -s -o /tmp/.tr_probe.$$ -w '%{http_code} %{time_total}' \
+        # -o /dev/null: 只在 kb/s 探测时丢弃响应体, 不写临时文件
+        # (/tmp 下的可预测文件名有符号链接风险)
+        m="$(curl -s -o /dev/null -w '%{http_code} %{time_total}' \
             -A "${USER_AGENT}" --max-time "${TIMEOUT}" "${u}" 2>/dev/null || echo "000 0")"
         code="${m%% *}"; secs="${m##* }"
         n="$(fetch_list "${u}" | grep -c . || true)"
         printf '%-62s %-6s %-8s %s\n' "${u:0:60}" "${code}" "${secs}" "${n:-0}"
     done
-    rm -f "/tmp/.tr_probe.$$"
     exit 0
 fi
 
@@ -81,8 +82,11 @@ LIST="$(printf '%s\n' "${ALL}" | awk 'NF && !seen[$0]++' | paste -sd, -)"
 COUNT="$(printf '%s\n' "${ALL}" | awk 'NF && !seen[$0]++' | grep -c . || true)"
 
 if grep -q '^bt-tracker=' "${CONF}"; then
-    # 用 awk 而非 sed: tracker 列表含大量正则元字符(/ : . -), sed 会解析失败
-    awk -v v="${LIST}" 'BEGIN{FS=OFS="="} $1=="bt-tracker"{$2=v; print; next} {print}' \
+    # 用 awk 而非 sed: tracker 列表含大量正则元字符(/ : . -), sed 会解析失败。
+    # 通过环境变量传入而非 `awk -v`: 后者会解析 C 转义序列(\t \n),
+    # 值中一旦出现反斜杠会被静默改写。
+    TRACKER_LIST="${LIST}" awk 'BEGIN{FS=OFS="="; v=ENVIRON["TRACKER_LIST"]}
+        $1=="bt-tracker"{$2=v; print; next} {print}' \
         "${CONF}" >"${CONF}.tracker.tmp" && mv -f "${CONF}.tracker.tmp" "${CONF}"
 else
     printf '\nbt-tracker=%s\n' "${LIST}" >>"${CONF}"

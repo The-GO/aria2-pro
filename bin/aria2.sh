@@ -252,6 +252,12 @@ Service_aria2() {
     fi
     install -m 0755 "${SVC_FILE}" "${INITD_FILE}"
     chmod +x "${INITD_FILE}"
+    # 按实际配置目录改写 init.d 内的路径(脚本默认值是 /root/.aria2)
+    sed -i \
+        -e "s|^ARIA2C=.*|ARIA2C=\"${ARIA2C}\"|" \
+        -e "s|^CONFIG=.*|CONFIG=\"${ARIA2_CONF_DIR}/aria2.conf\"|" \
+        -e "s|^LOG=.*|LOG=\"${ARIA2_CONF_DIR}/aria2.log\"|" \
+        "${INITD_FILE}"
     # 自带的 init.d 已内置全部修复(僵尸进程排除 / stop 等待退出 / start 轮询就绪)。
     eval ${SVC_REGISTER}
     echo -e "${Info} Aria2服务 管理脚本安装完成 !"
@@ -263,14 +269,6 @@ Installation_dependency() {
     else
         apt-get update -y
         DEBIAN_FRONTEND=noninteractive apt-get install -y wget curl nano ca-certificates findutils jq tar gzip unzip dpkg
-    fi
-    # python3 仅用于 init.d 热补丁; 缺失时降级为不修补, 不影响主流程
-    if ! command -v python3 >/dev/null 2>&1; then
-        if [[ ${release} = "centos" ]]; then
-            yum install -y python3 || true
-        else
-            DEBIAN_FRONTEND=noninteractive apt-get install -y python3 || true
-        fi
     fi
     if [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
         wget -qO- git.io/ca-certificates.sh | bash
@@ -384,8 +382,8 @@ ${Tip} Aria2 RPC 密钥不要包含等号(=)和井号(#)，留空为随机生成
             fi
         else
             # 用固定字符串匹配, 避免密钥中的正则元字符导致 sed 匹配失败
-            awk -v old="${aria2_passwd}" -v new="${aria2_RPC_passwd}" \
-                'BEGIN{FS=OFS="="} $1=="rpc-secret"{$2=new; print; next} {print}' \
+            A2_NEW_SECRET="${aria2_RPC_passwd}" awk \
+                'BEGIN{FS=OFS="="; n=ENVIRON["A2_NEW_SECRET"]} $1=="rpc-secret"{$2=n; print; next} {print}' \
                 "${ARIA2_CONF_DIR}/aria2.conf" >"${ARIA2_CONF_DIR}/aria2.conf.tmp" &&
                 mv -f "${ARIA2_CONF_DIR}/aria2.conf.tmp" "${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
@@ -437,7 +435,8 @@ Set_aria2_RPC_port() {
                 echo -e "${Error} RPC 端口修改失败！旧端口为：${Green_font_prefix}${aria2_port}${Font_color_suffix}"
             fi
         else
-            awk -v new="${aria2_RPC_port}" 'BEGIN{FS=OFS="="} $1=="rpc-listen-port"{$2=new; print; next} {print}' \
+            A2_NEW_PORT="${aria2_RPC_port}" awk \
+                'BEGIN{FS=OFS="="; n=ENVIRON["A2_NEW_PORT"]} $1=="rpc-listen-port"{$2=n; print; next} {print}' \
                 "${ARIA2_CONF_DIR}/aria2.conf" >"${ARIA2_CONF_DIR}/aria2.conf.tmp" &&
                 mv -f "${ARIA2_CONF_DIR}/aria2.conf.tmp" "${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
@@ -486,7 +485,8 @@ Set_aria2_RPC_dir() {
                 echo -e "${Error} 下载目录修改失败！旧位置为：${Green_font_prefix}${aria2_dir}${Font_color_suffix}"
             fi
         else
-            awk -v new="${aria2_RPC_dir}" 'BEGIN{FS=OFS="="} $1=="dir"{$2=new; print; next} {print}' \
+            A2_NEW_DIR="${aria2_RPC_dir}" awk \
+                'BEGIN{FS=OFS="="; n=ENVIRON["A2_NEW_DIR"]} $1=="dir"{$2=n; print; next} {print}' \
                 "${ARIA2_CONF_DIR}/aria2.conf" >"${ARIA2_CONF_DIR}/aria2.conf.tmp" &&
                 mv -f "${ARIA2_CONF_DIR}/aria2.conf.tmp" "${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
@@ -569,11 +569,13 @@ Read_config() {
         fi
     else
         conf_text=$(grep -v '^#' "${ARIA2_CONF_DIR}/aria2.conf")
-        aria2_dir=$(grep "^dir=" <<<"${conf_text}" | awk -F "=" '{print $NF}')
-        aria2_port=$(grep "^rpc-listen-port=" <<<"${conf_text}" | awk -F "=" '{print $NF}')
-        aria2_passwd=$(grep "^rpc-secret=" <<<"${conf_text}" | awk -F "=" '{print $NF}')
-        aria2_bt_port=$(grep "^listen-port=" <<<"${conf_text}" | awk -F "=" '{print $NF}')
-        aria2_dht_port=$(grep "^dht-listen-port=" <<<"${conf_text}" | awk -F "=" '{print $NF}')
+        # 用 cut -d= -f2- 而非 awk -F= '{print $NF}': 后者会把含 = 的
+        # 值(如 rpc-secret=ab=cd)截断成最后一段。
+        aria2_dir=$(grep "^dir=" <<<"${conf_text}" | cut -d= -f2-)
+        aria2_port=$(grep "^rpc-listen-port=" <<<"${conf_text}" | cut -d= -f2-)
+        aria2_passwd=$(grep "^rpc-secret=" <<<"${conf_text}" | cut -d= -f2-)
+        aria2_bt_port=$(grep "^listen-port=" <<<"${conf_text}" | cut -d= -f2-)
+        aria2_dht_port=$(grep "^dht-listen-port=" <<<"${conf_text}" | cut -d= -f2-)
     fi
 }
 

@@ -96,11 +96,6 @@ else
     apt-get update -y
     apt-get install -y wget curl ca-certificates findutils jq tar gzip unzip
 fi
-command -v python3 >/dev/null || {
-    info "安装 python3(用于 init.d 热修补) ..."
-    if [[ ${release} == "centos" ]]; then yum install -y python3 || true
-    else apt-get install -y python3 || true; fi
-}
 
 # ---- aria2 二进制 ---------------------------------------------------------
 if [[ -x "${ARIA2C}" ]]; then
@@ -174,6 +169,25 @@ mkdir -p "${DOWNLOAD_PATH}" "${DOWNLOAD_PATH}/completed"
 touch "${ARIA2_CONF_DIR}/aria2.session"
 
 # ---- init.d 服务 ----------------------------------------------------------
+# 安装 init.d 并按实际路径改写 CONFIG/LOG/ARIA2C(脚本内默认值是 /root/.aria2,
+# 用户用 --conf-dir 指定别处时必须同步, 否则服务会指向不存在的配置)。
+install_initd() {
+    local src="$1" dst="${INITD_FILE:-/etc/init.d/aria2}"
+    if [[ ! -s "${src}" ]]; then
+        err "未找到 init.d 脚本: ${src}"
+        return 1
+    fi
+    install -m 0755 "${src}" "${dst}"
+    # 按实际安装路径改写这三行(脚本内默认 /root/.aria2)。
+    # 整行替换而非 sed 捕获组, 避免路径中的特殊字符干扰。
+    sed -i \
+        -e "s|^ARIA2C=.*|ARIA2C=\"${ARIA2C}\"|" \
+        -e "s|^CONFIG=.*|CONFIG=\"${ARIA2_CONF_DIR}/aria2.conf\"|" \
+        -e "s|^LOG=.*|LOG=\"${ARIA2_CONF_DIR}/aria2.log\"|" \
+        "${dst}"
+    return 0
+}
+
 info "安装 systemd/init.d 服务 ..."
 UNIT=/etc/systemd/system/aria2.service
 # 若已存在 SysV init 脚本(systemd 通过 generator 接管), 继续用 init.d + 热补丁,
@@ -183,11 +197,7 @@ HAVE_INITD=0
 
 if [[ ${HAVE_INITD} -eq 1 ]]; then
     info "检测到现有 /etc/init.d/aria2, 替换为 aria2-pro 版本(已内置修复)"
-    if [[ -s "${INSTALL_SRC}/service/aria2_debian" ]]; then
-        install -m 0755 "${INSTALL_SRC}/service/aria2_debian" /etc/init.d/aria2
-    else
-        err "未找到 ${INSTALL_SRC}/service/aria2_debian"
-    fi
+    install_initd "${INSTALL_SRC}/service/aria2_debian"
     update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
 elif command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
     cat > "${UNIT}" <<UNIT_EOF
@@ -210,13 +220,9 @@ UNIT_EOF
     info "已安装 systemd 单元: ${UNIT}"
 else
     # 无 systemd: 安装项目自带的 init.d 脚本(已内置全部修复)
-    if [[ -s "${INSTALL_SRC}/service/aria2_debian" ]]; then
-        install -m 0755 "${INSTALL_SRC}/service/aria2_debian" /etc/init.d/aria2
-        update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
-        info "已安装 init.d 脚本"
-    else
-        err "未找到 ${INSTALL_SRC}/service/aria2_debian"
-    fi
+    install_initd "${INSTALL_SRC}/service/aria2_debian"
+    update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
+    info "已安装 init.d 脚本"
 fi
 
 info ""

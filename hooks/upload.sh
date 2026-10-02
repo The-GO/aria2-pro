@@ -28,8 +28,10 @@ CHECK_CORE_FILE() { :; } # kept for upstream call-site compatibility
 CHECK_RCLONE() {
     if [[ $# -eq 0 ]]; then
         echo -e "\nChecking RCLONE connection ..."
-        if rclone mkdir "${DRIVE_NAME}:${DRIVE_DIR}/.aria2-pro-probe" 2>/dev/null; then
-            rclone rmdir "${DRIVE_NAME}:${DRIVE_DIR}/.aria2-pro-probe" 2>/dev/null
+        # DRIVE_DIR 为空时拼出 "remote:.probe"(缺前导斜杠), 统一规范化为根路径
+        local probe="${DRIVE_NAME}:${DRIVE_DIR%/}/.aria2-pro-probe"
+        if rclone mkdir "${probe}" 2>/dev/null; then
+            rclone rmdir "${probe}" 2>/dev/null
             info "Rclone connection OK."
             exit 0
         else
@@ -51,16 +53,23 @@ TASK_INFO() {
 }
 
 DEFINITION_PATH() {
-    LOCAL_PATH="${TASK_PATH}"
-    if [[ -f "${TASK_PATH}" ]]; then
-        REMOTE_PATH="${DRIVE_NAME}:${DRIVE_DIR}${DEST_PATH_SUFFIX%/*}"
-    else
-        REMOTE_PATH="${DRIVE_NAME}:${DRIVE_DIR}${DEST_PATH_SUFFIX}"
+    # 路径推导异常(空串/根/下载根)时拒绝继续, 否则后面的 rm -rf 会删掉本地数据。
+    require_path "${TASK_PATH}" "local task path" || exit 1
+    if path_is_under "${ARIA2_DOWNLOAD_DIR}" "${TASK_PATH}"; then
+        err "Refusing to upload '${TASK_PATH}': it contains the aria2 download root."
+        exit 1
     fi
-    # Upstream computed REMOTE_PATH the same way but let a trailing '/' or an
-    # empty suffix collapse into 'remote:' + '/', silently targeting the root.
-    if [[ "${REMOTE_PATH}" == "${DRIVE_NAME}:" ]]; then
-        REMOTE_PATH="${DRIVE_NAME}:${DRIVE_DIR}"
+    LOCAL_PATH="${TASK_PATH}"
+    # 规范化 DRIVE_DIR: 去掉结尾斜杠, 避免与后缀拼出双斜杠
+    local drive_dir="${DRIVE_DIR%/}"
+    if [[ -f "${TASK_PATH}" ]]; then
+        REMOTE_PATH="${DRIVE_NAME}:${drive_dir}${DEST_PATH_SUFFIX%/*}"
+    else
+        REMOTE_PATH="${DRIVE_NAME}:${drive_dir}${DEST_PATH_SUFFIX}"
+    fi
+    # 空后缀会让路径塌成 "remote:" 指向网盘根目录, 这里显式兜底
+    if [[ -z "${DEST_PATH_SUFFIX}" || "${DEST_PATH_SUFFIX}" == "/" ]]; then
+        REMOTE_PATH="${DRIVE_NAME}:${drive_dir}"
     fi
 }
 
@@ -105,7 +114,13 @@ UPLOAD_FILE() {
     LOG="$(date_time) ${INFO} Upload done: ${LOCAL_PATH} -> ${REMOTE_PATH}"
     OUTPUT_LOG
     info "Removing local source after verified upload ..."
-    rm -rf -- "${LOCAL_PATH}"
+    # 删前再校验一次: 上传过程中路径变量不应变化, 但这是最后一道防线。
+    if require_path "${LOCAL_PATH}" "local source" && [[ -e "${LOCAL_PATH}" ]]; then
+        rm -rf -- "${LOCAL_PATH}"
+    else
+        err "Local source disappeared or is unsafe, not deleting: ${LOCAL_PATH}"
+        exit 1
+    fi
     DELETE_EMPTY_DIR
 }
 
