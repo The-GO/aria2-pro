@@ -637,7 +637,7 @@ Clean_Log() {
 }
 
 crontab_update_status() {
-    crontab -l 2>/dev/null | grep "tracker-update.sh"
+    crontab -l 2>/dev/null | grep "# aria2-pro:tracker-update"
 }
 
 Update_bt_tracker_cron() {
@@ -668,8 +668,10 @@ Update_bt_tracker_cron() {
 
 crontab_update_start() {
     crontab -l >"/tmp/crontab.bak" 2>/dev/null
-    sed -i "/tracker-update.sh/d" "/tmp/crontab.bak"
-    echo -e "\n0 7 * * * /bin/bash ${ARIA2_CONF_DIR}/tracker-update.sh 2>&1 | tee ${ARIA2_CONF_DIR}/tracker.log" >>"/tmp/crontab.bak"
+    # 只删本脚本写入的行(带 aria2-pro 标记), 避免误删用户其他含
+    # "tracker-update.sh" 字样的 crontab 条目
+    sed -i "/# aria2-pro:tracker-update/d" "/tmp/crontab.bak"
+    echo -e "\n0 7 * * * /bin/bash ${ARIA2_CONF_DIR}/tracker-update.sh 2>&1 | tee ${ARIA2_CONF_DIR}/tracker.log # aria2-pro:tracker-update" >>"/tmp/crontab.bak"
     crontab "/tmp/crontab.bak"
     rm -f "/tmp/crontab.bak"
     if [[ -z $(crontab_update_status) ]]; then
@@ -682,7 +684,7 @@ crontab_update_start() {
 
 crontab_update_stop() {
     crontab -l >"/tmp/crontab.bak" 2>/dev/null
-    sed -i "/tracker-update.sh/d" "/tmp/crontab.bak"
+    sed -i "/# aria2-pro:tracker-update/d" "/tmp/crontab.bak"
     crontab "/tmp/crontab.bak"
     rm -f "/tmp/crontab.bak"
     if [[ -n $(crontab_update_status) ]]; then
@@ -694,13 +696,19 @@ crontab_update_stop() {
 
 Update_bt_tracker() {
     check_installed_status
+    # tracker-update.sh 由 install.sh 安装, 是唯一实现(不再从 P3TERX 下载旧脚本)。
+    # 缺失时尝试从本项目的 bin/ 目录复制, 避免降级到已过时的上游版本。
     local script="${ARIA2_CONF_DIR}/tracker-update.sh"
+    local src
+    src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/bin/tracker-update.sh"
     if [[ ! -s "${script}" ]]; then
-        wget -N -t2 -T10 -q "https://raw.githubusercontent.com/P3TERX/aria2.conf/master/tracker.sh" -O "${script}" || {
-            echo -e "${Error} BT-Tracker 更新脚本下载失败 !"
+        if [[ -s "${src}" ]]; then
+            install -m 0755 "${src}" "${script}"
+        else
+            echo -e "${Error} tracker-update.sh 不存在: ${script}"
+            echo -e "${Tip} 请从 aria2-pro 项目 bin/ 目录复制, 或重新运行 install.sh。"
             exit 1
-        }
-        chmod +x "${script}"
+        fi
     fi
     check_pid
     if [[ -z ${PID} ]]; then
@@ -724,7 +732,7 @@ Uninstall_aria2() {
     [[ -z ${unyn} ]] && unyn="n"
     if [[ ${unyn} == [Yy] ]]; then
         crontab -l >"/tmp/crontab.bak" 2>/dev/null
-        sed -i "/tracker-update.sh/d" "/tmp/crontab.bak"
+        sed -i "/# aria2-pro:tracker-update/d" "/tmp/crontab.bak"
         crontab "/tmp/crontab.bak"
         rm -f "/tmp/crontab.bak"
         check_pid
