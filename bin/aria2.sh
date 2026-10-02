@@ -2,10 +2,10 @@
 #
 # aria2-pro — Aria2 一键安装 / 管理脚本
 #
-# 基于 P3TERX/aria2.sh (v2.7.4, 上游 2020 年后停止维护) 重写。
+# 灵感与初始代码来自 P3TERX/aria2.sh (v2.7.4, 上游 2020 年后停止维护)。
 #
 # 主要变化:
-#   - 支持 aria2 1.37.0(二进制源改为 abcfy2/aria2-static-build, 上游依赖的
+#   - 支持 aria2 1.37.0(二进制源改用 abcfy2/aria2-static-build, 因为原依赖的
 #     P3TERX/Aria2-Pro-Core 自 2021 年起不再发布)
 #   - 修正 max-connection-per-server=32 在 aria2 >=1.36 会导致拒绝启动的问题
 #   - 移除 aria2 1.37 已删除的 retry-on-400/403/406/unknown
@@ -31,8 +31,7 @@ INITD_FILE="/etc/init.d/aria2"
 CRONTAB_FILE="/usr/bin/crontab"
 # 已知稳定版(当 GitHub latest 返回 continuous 滚动构建时使用)
 ARIA2_FALLBACK_VER="1.37.0"
-# 上游(已停止维护), 仅供对比参考
-UPSTREAM_URL="https://github.com/P3TERX/aria2.sh"
+REPO_URL="https://github.com/The-GO/aria2-pro"
 
 Green_font_prefix="\033[32m"
 Red_font_prefix="\033[31m"
@@ -118,10 +117,8 @@ check_pid() {
 # /root/.aria2/ 不同, 因此安装目录换成 /root/.aria2 以保持一致。
 check_new_ver() {
     aria2_new_ver=$(
-        {
-            wget -t2 -T10 -qO- "https://api.github.com/repos/abcfy2/aria2-static-build/releases/latest" ||
-                wget -t2 -T10 -qO- "https://gh-api.p3terx.com/repos/abcfy2/aria2-static-build/releases/latest"
-        } | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4
+        wget -t2 -T10 -qO- "https://api.github.com/repos/abcfy2/aria2-static-build/releases/latest" \
+            | grep -o '"tag_name": *"[^"]*"' | head -n 1 | cut -d'"' -f4
     )
     # 'continuous' 是滚动构建, 无对应版本号, 回退到已知稳定版
     [[ -z ${aria2_new_ver} || ${aria2_new_ver} == "continuous" ]] && aria2_new_ver="${ARIA2_FALLBACK_VER}"
@@ -172,9 +169,10 @@ Download_aria2() {
     done
     CREATE_TMP=$(mktemp -d)
     DOWNLOAD_URL="https://github.com/abcfy2/aria2-static-build/releases/download/${aria2_new_ver}/aria2-${MAPPED_ARCH}-linux-musl_static.zip"
+    # wget 失败时用 curl 重试(避免为单一下载引入第三方镜像依赖)。
     {
         wget -t2 -T10 -qO "${CREATE_TMP}/aria2.zip" "${DOWNLOAD_URL}" ||
-            wget -t2 -T10 -qO "${CREATE_TMP}/aria2.zip" "https://gh-acc.p3terx.com/${DOWNLOAD_URL}"
+            curl -fsSL --retry 2 --max-time 60 -o "${CREATE_TMP}/aria2.zip" "${DOWNLOAD_URL}"
     }
     if [[ ! -s "${CREATE_TMP}/aria2.zip" ]]; then
         rm -rf "${CREATE_TMP}"
@@ -205,7 +203,7 @@ Download_aria2() {
 }
 
 Download_aria2_conf() {
-    PROFILE_LIST="aria2.conf script.conf rclone.env core upload.sh move.sh delete.sh clean.sh dht.dat dht6.dat LICENSE"
+    PROFILE_LIST="aria2.conf script.conf rclone.env core upload.sh move.sh delete.sh clean.sh LICENSE"
     mkdir -p "${ARIA2_CONF_DIR}" "${HOOKS_DIR}"
     local src="${ARIA2_PRO_SRC:-}"
     if [[ -z "${src}" ]]; then
@@ -228,48 +226,36 @@ Download_aria2_conf() {
     sed -i "s@^on-download-error=.*@on-download-error=${HOOKS_DIR}/delete.sh@" "${ARIA2_CONF_DIR}/aria2.conf"
     sed -i "s@^\(rpc-secret=\).*@\1$(date +%s%N | md5sum | head -c 20)@" "${ARIA2_CONF_DIR}/aria2.conf"
     sed -i "s@^\(dest-dir=\).*@\1${DOWNLOAD_PATH}/completed@" "${ARIA2_CONF_DIR}/script.conf"
-    if [[ ! -e "${ARIA2_CONF_DIR}/dht.dat" ]]; then
-        wget -N -t2 -T10 -q "https://raw.githubusercontent.com/P3TERX/aria2.conf/master/dht.dat" -O "${ARIA2_CONF_DIR}/dht.dat"
-        wget -N -t2 -T10 -q "https://raw.githubusercontent.com/P3TERX/aria2.conf/master/dht6.dat" -O "${ARIA2_CONF_DIR}/dht6.dat"
-    fi
+    # 不再预置 dht.dat / dht6.dat: 它们是 DHT 路由表的运行时数据, aria2 官方
+    # 从不分发, 第三方快照来源不可控。aria2 启动后会自行填充路由表并保存到
+    # 该路径(需在 aria2.conf 配置 dht-file-path / dht-file-path6)。
     touch "${ARIA2_CONF_DIR}/aria2.session"
     echo -e "${Info} Aria2 配置文件安装完成！"
 }
 
-# 上游 service/aria2_debian 自 2020 年后未更新, 存在三个缺陷, 下载后就地热修。
-Patch_initd() {
-    # 优先使用随项目发布的 service/patch_initd.py; 找不到时降级为跳过
-    # (不再内嵌一份, 避免两处逻辑不一致)。
-    local patcher
-    patcher="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/service/patch_initd.py"
-    [[ -s "${patcher}" ]] || return 1
-    python3 "${patcher}" "${INITD_FILE}"
-}
-
 Service_aria2() {
+    # 使用项目自带的 init.d 脚本(service/aria2_debian 或 aria2_centos),
+    # 不再从第三方仓库下载。两者脚本体一致, 仅注册方式不同。
+    local src
+    src="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/service"
     if [[ ${release} = "centos" ]]; then
-        wget -N -t2 -T10 "https://raw.githubusercontent.com/P3TERX/aria2.sh/master/service/aria2_centos" -O "${INITD_FILE}" ||
-            wget -N -t2 -T10 "https://cdn.jsdelivr.net/gh/P3TERX/aria2.sh@master/service/aria2_centos" -O "${INITD_FILE}" ||
-            wget -N -t2 -T10 "https://gh-raw.p3terx.com/P3TERX/aria2.sh/master/service/aria2_centos" -O "${INITD_FILE}"
+        SVC_FILE="${src}/aria2_centos"
         SVC_REGISTER="chkconfig --add aria2 && chkconfig aria2 on"
     else
-        wget -N -t2 -T10 "https://raw.githubusercontent.com/P3TERX/aria2.sh/master/service/aria2_debian" -O "${INITD_FILE}" ||
-            wget -N -t2 -T10 "https://cdn.jsdelivr.net/gh/P3TERX/aria2.sh@master/service/aria2_debian" -O "${INITD_FILE}" ||
-            wget -N -t2 -T10 "https://gh-raw.p3terx.com/P3TERX/aria2.sh/master/service/aria2_debian" -O "${INITD_FILE}"
+        SVC_FILE="${src}/aria2_debian"
         SVC_REGISTER="update-rc.d -f aria2 defaults"
     fi
-    [[ ! -s "${INITD_FILE}" ]] && {
-        echo -e "${Error} Aria2服务 管理脚本下载失败 !"
+    if [[ ! -s "${SVC_FILE}" ]]; then
+        echo -e "${Error} 未找到 init.d 脚本: ${SVC_FILE}"
+        echo -e "${Tip} 请从 aria2-pro 项目 service/ 目录获取, 或重新运行 install.sh。"
         exit 1
-    }
-    chmod +x "${INITD_FILE}"
-    if command -v python3 >/dev/null 2>&1; then
-        Patch_initd || echo -e "${Tip} init.d 热补丁未应用(结构已变化), 启动/停止功能不受影响。"
     fi
+    install -m 0755 "${SVC_FILE}" "${INITD_FILE}"
+    chmod +x "${INITD_FILE}"
+    # 自带的 init.d 已内置全部修复(僵尸进程排除 / stop 等待退出 / start 轮询就绪)。
     eval ${SVC_REGISTER}
-    echo -e "${Info} Aria2服务 管理脚本下载完成 !"
+    echo -e "${Info} Aria2服务 管理脚本安装完成 !"
 }
-
 Installation_dependency() {
     if [[ ${release} = "centos" ]]; then
         yum update -y
@@ -537,7 +523,7 @@ ${Tip} 手动修改配置文件须知：
  ${Green_font_prefix}1.${Font_color_suffix} 默认使用 nano 文本编辑器打开
  ${Green_font_prefix}2.${Font_color_suffix} 退出并保存文件：按 ${Green_font_prefix}Ctrl+X${Font_color_suffix} 组合键，输入 ${Green_font_prefix}y${Font_color_suffix} ，按 ${Green_font_prefix}Enter${Font_color_suffix} 键
  ${Green_font_prefix}3.${Font_color_suffix} 退出不保存文件：按 ${Green_font_prefix}Ctrl+X${Font_color_suffix} 组合键，输入 ${Green_font_prefix}n${Font_color_suffix}
- ${Green_font_prefix}4.${Font_color_suffix} nano 详细使用教程：${Green_font_prefix}https://p3terx.com/archives/linux-nano-tutorial.html${Font_color_suffix}
+ ${Green_font_prefix}4.${Font_color_suffix} nano 快捷键：Ctrl+O 保存，Ctrl+X 退出，Ctrl+W 搜索，Ctrl+K 剪切当前行
  ${Green_font_prefix}5.${Font_color_suffix} 配置文件有中文注释，若语言设置有问题会导致中文乱码
 "
     read -e -p "按任意键继续，按 Ctrl+C 组合键取消" var
@@ -794,25 +780,25 @@ Set_iptables() {
     fi
 }
 
-# 只检查更新并提示手动合并。
-# 上游 P3TERX/aria2.sh 自 2020 年(v2.7.4)起停止维护, 自动拉取覆盖会抹掉
-# 本版本对 aria2 1.37 的支持与全部修复。
+# 检查本项目自身的更新(而非上游 P3TERX 项目)。
 Update_Shell() {
-    sh_new_ver=$(wget -qO- -t1 -T10 "https://raw.githubusercontent.com/P3TERX/aria2.sh/master/aria2.sh" 2>/dev/null | grep 'sh_ver="' | awk -F "=" '{print $NF}' | sed 's/"//g' | head -1)
+    sh_new_ver=$(wget -qO- -t1 -T10 "https://raw.githubusercontent.com/The-GO/aria2-pro/main/README.md" 2>/dev/null \
+        | grep -m1 -oE 'aria2-pro v[0-9]+\.[0-9]+\.[0-9]+' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
     if [[ -z ${sh_new_ver} ]]; then
-        echo -e "${Error} 无法链接到 Github，检查更新失败 !" && exit 0
+        echo -e "${Error} 无法连接 GitHub，检查更新失败 !" && exit 0
     fi
     if [[ "${sh_new_ver}" == "${sh_ver}" ]]; then
         echo -e "${Info} 当前已是最新版本[ ${sh_ver} ]。"
         exit 0
     fi
-    echo -e "${Info} 检测到上游版本[ ${sh_new_ver} ]，当前版本[ ${sh_ver} ]。"
-    echo -e "${Tip} 上游长期未维护, 自动覆盖会丢失 aria2 1.37 支持与全部修复。"
-    echo -e "${Tip} 请访问 ${UPSTREAM_URL} 手动比对差异。"
+    echo -e "${Info} 发现新版本[ ${sh_new_ver} ]，当前版本[ ${sh_ver} ]。"
+    echo -e "${Tip} 请拉取最新代码后重新运行 install.sh:"
+    echo -e "  git pull && bash install.sh"
+    echo -e "${Tip} 项目地址: ${REPO_URL}"
     exit 0
 }
 
-echo && echo -e " Aria2 一键安装管理脚本 ${Red_font_prefix}增强版${Font_color_suffix} ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix} by \033[1;35mP3TERX.COM\033[0m
+echo && echo -e " aria2-pro 一键安装管理脚本 ${Red_font_prefix}[v${sh_ver}]${Font_color_suffix} by \033[1;35m${REPO_URL}\033[0m
 
  ${Green_font_prefix} 0.${Font_color_suffix} 升级脚本
 ———————————————————————

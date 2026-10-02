@@ -178,19 +178,41 @@ bash bin/aria2.sh    # 8 查看配置 → 输出 AriaNg 一键链接
 
 ---
 
-## 目录结构
+## 仓库结构
 
-安装后：
+```
+aria2-pro/
+├── install.sh              一键安装脚本
+├── bin/
+│   ├── aria2.sh            交互式管理面板
+│   └── tracker-update.sh   BT-Tracker 更新工具(主源 cf.trackerslist.com)
+├── conf/
+│   ├── aria2.conf          aria2 配置(已针对 1.37.0 逐项校验)
+│   ├── script.conf         钩子行为配置(上传/移动/删除/清理/过滤)
+│   └── rclone.env          rclone 环境变量
+├── hooks/
+│   ├── core                共享函数库
+│   ├── clean.sh            下载完成 → 清理
+│   ├── upload.sh           下载完成 → 上传网盘
+│   ├── move.sh             下载完成 → 移动目录
+│   └── delete.sh           下载停止/出错 → 删除
+├── service/
+│   ├── aria2_debian        init.d 服务脚本(Debian/Ubuntu)
+│   └── aria2_centos        init.d 服务脚本(CentOS)
+├── README.md
+└── LICENSE
+```
+
+### 安装后的运行目录
 
 ```
 /root/.aria2/
 ├── aria2.conf          # aria2 配置(适配 1.37)
-├── script.conf         # 钩子行为配置(上传/移动/删除/清理/过滤)
+├── script.conf         # 钩子行为配置
 ├── rclone.env          # rclone 环境变量
 ├── aria2.session       # 会话文件
 ├── aria2.log           # 日志
 ├── hooks.log           # 钩子专用日志
-├── dht.dat / dht6.dat  # DHT 路由表
 ├── tracker-update.sh   # BT-Tracker 更新工具
 └── hooks/
     ├── core            # 共享函数库
@@ -265,13 +287,14 @@ bash bin/tracker-update.sh --test        # 测速所有源, 不写入配置
 
 | 源 | 说明 |
 |----|------|
-| `https://cf.trackerslist.com/best.txt` | **主源**，Cloudflare CDN，~70 条 |
-| `https://cf.trackerslist.com/all.txt` | 全量列表，~120 条 |
+| `https://cf.trackerslist.com/best.txt` | **主源**，Cloudflare CDN，71 条 |
+| `https://cf.trackerslist.com/all.txt` | 全量列表，122 条 |
 | `https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt` | 备用 |
 | `https://trackerslist.com/best.txt` | 备用（与主源同内容） |
-| `https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt` | 最低优先级（已过时，仅 20 条） |
 
 实测聚合后约 122 个去重 tracker。协议覆盖 `udp` / `http` / `https` / `wss`（WebTorrent）。
+
+`bash bin/tracker-update.sh --test` 可测速各源，不写入配置。
 
 写入使用 `awk` 而非 `sed`——tracker 列表含大量正则元字符（`/` `:` `.` `-`），用 `sed` 做替换会解析失败。
 
@@ -356,12 +379,22 @@ x86_64、aarch64/arm64、armv7、i686/i386、loongarch64。由 `abcfy2/aria2-sta
 
 ---
 
-## 上游致谢
+## 致谢与依赖
 
-- [P3TERX/aria2.sh](https://github.com/P3TERX/aria2.sh) — 一键安装管理脚本
-- [P3TERX/aria2.conf](https://github.com/P3TERX/aria2.conf) — Aria2 完美配置方案
-- [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) — 提供 aria2 静态构建
-- [aria2](https://github.com/aria2/aria2) — 下载工具本体
+**本项目运行期零第三方脚本依赖**：不下载、不执行任何外部 shell 脚本。
+
+| 依赖 | 用途 |
+|------|------|
+| [abcfy2/aria2-static-build](https://github.com/abcfy2/aria2-static-build) | aria2 1.37.0 静态二进制下载源 |
+| [aria2](https://github.com/aria2/aria2) | 下载工具本体 |
+| rclone / jq / curl（需自行安装） | 上传、JSON 解析、RPC 调用 |
+
+已内嵌到仓库、不再从外部获取的资源：
+
+- `service/aria2_debian`、`service/aria2_centos` — init.d 服务脚本（含全部修复）
+- `dht.dat` / `dht6.dat` — **不再预置**。它们是 DHT 路由表的运行时数据，aria2 官方从不分发，第三方快照来源不可控。aria2 启动后自行填充并保存
+
+署名（MIT 许可证要求）：初始代码灵感来自 [P3TERX/aria2.sh](https://github.com/P3TERX/aria2.sh) 与 [P3TERX/aria2.conf](https://github.com/P3TERX/aria2.conf)。
 
 ---
 

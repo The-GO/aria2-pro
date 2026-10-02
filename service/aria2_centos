@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+#
+# aria2-pro — SysV init 服务脚本
+#
+# 自包含实现, 不依赖任何上游第三方脚本。仅用于没有 systemd 的环境
+# (或用户希望沿用 init.d 的场景)。有 systemd 时优先使用 systemd 单元。
+#
+# 相比常见的旧版 init.d 脚本, 本实现修复了三个缺陷:
+#   1. check_running 用 `ps -ef | grep` 会把僵尸(Z)进程判成"正在运行",
+#      导致 kill -9 无效、restart 后拒绝启动(aria2 实际已死)。
+#   2. do_stop 只 kill 不等待退出, 紧接着 start 会因端口/会话占用失败。
+#   3. do_start 固定 sleep 2s 判成败, 在慢机 / ARM 上误报启动失败。
+#
+
+NAME="aria2"
+NAME_BIN="aria2c"
+ARIA2C="/usr/local/bin/aria2c"
+CONFIG="/root/.aria2/aria2.conf"
+LOG="/root/.aria2/aria2.log"
+PID=""
+
+Green_font_prefix="\033[32m"
+Red_font_prefix="\033[31m"
+Font_color_suffix="\033[0m"
+Info="[${Green_font_prefix}信息${Font_color_suffix}]"
+Error="[${Red_font_prefix}错误${Font_color_suffix}]"
+RETVAL=0
+
+# 只统计真实运行的进程: 排除僵尸, 并通过 /proc/*/cmdline 二次确认。
+# 僵尸进程无法被 kill, 且会让旧的 ps|grep 判定永远返回"正在运行"。
+check_running() {
+    # 只认本实例: 命令行必须同时含 aria2c 与本脚本的 --conf-path。
+    # 否则在同机多实例(或多个 aria2c)时会误判/误杀别人的进程。
+    # 另外排除僵尸(Z)进程——僵尸无法 kill, 会让旧的 ps|grep 判定永远"正在运行"。
+    PID=""
+    local p state real="" cmd
+    while read -r p state; do
+        [[ -z "${p}" || -z "${state}" ]] && continue
+        [[ "${state}" == Z* ]] && continue
+        if [[ -r "/proc/${p}/cmdline" ]]; then
+            cmd="$(tr '\0' ' ' <"/proc/${p}/cmdline" 2>/dev/null)"
+            if [[ "${cmd}" == *"${NAME_BIN}"* && "${cmd}" == *"--conf-path=${CONFIG}"* ]]; then
+                real="${real} ${p}"
+            fi
+        fi
+    done < <(ps -eo pid,stat,comm | awk -v n="${NAME_BIN}" '$3==n {print $1" "$2}')
+    PID="${real# }"
+    [[ -z "${PID}" ]] && return 1
+    return 0
+}
+
+Read_config() {
+    [[ ! -e ${CONFIG} ]] && { echo -e "${Error} ${NAME} 配置文件不存在 !" >&2; exit 1; }
+    local v
+    # 只取未被注释的有效配置行
+    v="$(grep -E '^[[:space:]]*dir[[:space:]]*=' "${CONFIG}" | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -n "${v}" ]] && DOWNLOAD_DIR="${v}" || DOWNLOAD_DIR="找不到配置参数"
+    v="$(grep -E '^[[:space:]]*rpc-listen-port[[:space:]]*=' "${CONFIG}" | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -n "${v}" ]] && RPC_LISTEN_PORT="${v}" || RPC_LISTEN_PORT="找不到配置参数"
+    v="$(grep -E '^[[:space:]]*rpc-secret[[:space:]]*=' "${CONFIG}" | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    [[ -n "${v}" ]] && RPC_SECRET="${v}" || RPC_SECRET="找不到配置参数(或无密钥)"
+}
+
+View_Config() {
+    Read_config
+    local IPV4 IPV6 AriaNg_URL AriaNg_API
+    IPV4="$(wget -qO- -t1 -T2 -4 api.ip.sb/ip 2>/dev/null || wget -qO- -t1 -T2 -4 ifconfig.io/ip 2>/dev/null || true)"
+    IPV6="$(wget -qO- -t1 -T2 -6 api.ip.sb/ip 2>/dev/null || wget -qO- -t1 -T2 -6 ifconfig.io/ip 2>/dev/null || true)"
+    [[ -z "${IPV4}" ]] && IPV4="IPv4 地址检测失败"
+    [[ -z "${IPV6}" ]] && IPV6="IPv6 地址检测失败"
+    if [[ -z "${IPV4}" || -z "${RPC_LISTEN_PORT}" ]]; then
+        AriaNg_URL="null"
+    else
+        AriaNg_API="/#!/settings/rpc/set/ws/${IPV4}/${RPC_LISTEN_PORT}/jsonrpc/$(echo -n "${RPC_SECRET}" | base64)"
+        AriaNg_URL="http://ariang.js.org${AriaNg_API}"
+    fi
+    printf '\nAria2 简单配置信息:\n\n'
+    echo -e " IPv4 地址\t: ${Green_font_prefix}${IPV4}${Font_color_suffix}"
+    echo -e " IPv6 地址\t: ${Green_font_prefix}${IPV6}${Font_color_suffix}"
+    echo -e " RPC 端口\t: ${Green_font_prefix}${RPC_LISTEN_PORT}${Font_color_suffix}"
+    echo -e " RPC 密钥\t: ${Green_font_prefix}${RPC_SECRET}${Font_color_suffix}"
+    echo -e " 下载目录\t: ${Green_font_prefix}${DOWNLOAD_DIR}${Font_color_suffix}"
+    echo -e " AriaNg 链接\t: ${Green_font_prefix}${AriaNg_URL}${Font_color_suffix}\n"
+}
+
+do_start() {
+    check_running && { echo -e "${Info} ${NAME} 正在运行(PID ${PID})" && return 0; }
+    [[ ! -x "${ARIA2C}" ]] && { echo -e "${Error} ${ARIA2C} 不存在或不可执行 !" >&2; return 1; }
+    echo -e "${Info} ${NAME} 启动中..."
+    ulimit -n 65535 2>/dev/null
+    nohup "${ARIA2C}" --conf-path="${CONFIG}" >>"${LOG}" 2>&1 &
+    # 轮询等待 RPC 端口就绪, 替代固定 sleep 2s(慢机 / ARM 上会误判失败)
+    local ok=0 i
+    for i in {1..30}; do
+        sleep 0.5
+        check_running && { ok=1; break; }
+    done
+    if [[ ${ok} -eq 1 ]]; then
+        View_Config
+        echo -e "${Info} ${NAME} 启动成功 !"
+        return 0
+    fi
+    echo -e "${Error} ${NAME} 启动失败, 请查看日志: ${LOG}" >&2
+    return 1
+}
+
+do_stop() {
+    check_running || { echo -e "${Info} ${NAME} 未运行"; RETVAL=1; return 1; }
+    kill -9 ${PID} 2>/dev/null
+    # 等待进程真正退出, 否则紧接着 start 会因端口/会话占用失败
+    local i
+    for i in {1..30}; do
+        check_running || break
+        sleep 0.2
+    done
+    echo -e "${Info} ${NAME} 停止成功 !"
+    return 0
+}
+
+do_status() {
+    if check_running; then
+        View_Config
+        echo -e "${Info} ${NAME} (PID ${PID}) 正在运行..."
+        return 0
+    fi
+    echo -e "${Info} ${NAME} 未运行 !"
+    RETVAL=1
+    return 1
+}
+
+do_restart() {
+    do_stop
+    do_start
+}
+
+case "${1:-}" in
+    start)   do_start ;;
+    stop)    do_stop ;;
+    restart) do_restart ;;
+    status)  do_status ;;
+    *)
+        echo "使用方法: $0 { start | stop | restart | status }" >&2
+        RETVAL=1
+        ;;
+esac
+exit ${RETVAL}

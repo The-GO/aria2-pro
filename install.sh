@@ -120,7 +120,8 @@ if [[ ${skip_bin:-0} -eq 0 ]]; then
     TMP="$(mktemp -d)"
     URL="https://github.com/abcfy2/aria2-static-build/releases/download/${NEW_VER}/aria2-${MAPPED_ARCH}-linux-musl_static.zip"
     info "下载 ${URL}"
-    wget -t2 -T20 -qO "${TMP}/a.zip" "${URL}" || wget -t2 -T20 -qO "${TMP}/a.zip" "https://gh-acc.p3terx.com/${URL}"
+    wget -t2 -T20 -qO "${TMP}/a.zip" "${URL}" \
+        || curl -fsSL --retry 2 --max-time 90 -o "${TMP}/a.zip" "${URL}"
     [[ -s "${TMP}/a.zip" ]] || { err "aria2 二进制下载失败"; rm -rf "${TMP}"; exit 1; }
     unzip -o -q "${TMP}/a.zip" -d "${TMP}"
     [[ -s "${TMP}/aria2c" ]] || { err "压缩包内未找到 aria2c"; rm -rf "${TMP}"; exit 1; }
@@ -168,10 +169,8 @@ if grep -q '^rpc-secret=' "${ARIA2_CONF_DIR}/aria2.conf"; then
 fi
 
 # DHT 数据文件(缺失时才下载)
-[[ -s "${ARIA2_CONF_DIR}/dht.dat" ]] || wget -N -t2 -T20 -q \
-    "https://raw.githubusercontent.com/P3TERX/aria2.conf/master/dht.dat" -O "${ARIA2_CONF_DIR}/dht.dat" || true
-[[ -s "${ARIA2_CONF_DIR}/dht6.dat" ]] || wget -N -t2 -T20 -q \
-    "https://raw.githubusercontent.com/P3TERX/aria2.conf/master/dht6.dat" -O "${ARIA2_CONF_DIR}/dht6.dat" || true
+# dht.dat / dht6.dat 不再预置: 它们是 DHT 路由表的运行时数据, aria2 官方
+# 从不分发, 第三方快照来源不可控。aria2 启动后自行填充并保存到该路径。
 
 # tracker 更新工具(独立文件, 不再内嵌 heredoc, 避免两处实现不一致)
 install -m 0755 "${INSTALL_SRC}/bin/tracker-update.sh" "${ARIA2_CONF_DIR}/tracker-update.sh"
@@ -188,9 +187,11 @@ HAVE_INITD=0
 [[ -x /etc/init.d/aria2 ]] && HAVE_INITD=1
 
 if [[ ${HAVE_INITD} -eq 1 ]]; then
-    info "检测到现有 /etc/init.d/aria2, 保留 init.d 管理方式"
-    if [[ -f "${INSTALL_SRC}/service/patch_initd.py" ]]; then
-        python3 "${INSTALL_SRC}/service/patch_initd.py" /etc/init.d/aria2 || true
+    info "检测到现有 /etc/init.d/aria2, 替换为 aria2-pro 版本(已内置修复)"
+    if [[ -s "${INSTALL_SRC}/service/aria2_debian" ]]; then
+        install -m 0755 "${INSTALL_SRC}/service/aria2_debian" /etc/init.d/aria2
+    else
+        err "未找到 ${INSTALL_SRC}/service/aria2_debian"
     fi
     update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
 elif command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
@@ -213,15 +214,13 @@ UNIT_EOF
     systemctl enable aria2 >/dev/null 2>&1 || true
     info "已安装 systemd 单元: ${UNIT}"
 else
-    # 无 systemd 时下载 init.d 并打补丁
-    wget -N -t2 -T20 "https://raw.githubusercontent.com/P3TERX/aria2.sh/master/service/aria2_debian" -O /etc/init.d/aria2 -q || true
-    if [[ -s /etc/init.d/aria2 ]]; then
-        chmod +x /etc/init.d/aria2
-        if [[ -f "${INSTALL_SRC}/service/patch_initd.py" ]]; then
-            python3 "${INSTALL_SRC}/service/patch_initd.py" /etc/init.d/aria2 || true
-        fi
+    # 无 systemd: 安装项目自带的 init.d 脚本(已内置全部修复)
+    if [[ -s "${INSTALL_SRC}/service/aria2_debian" ]]; then
+        install -m 0755 "${INSTALL_SRC}/service/aria2_debian" /etc/init.d/aria2
         update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
         info "已安装 init.d 脚本"
+    else
+        err "未找到 ${INSTALL_SRC}/service/aria2_debian"
     fi
 fi
 

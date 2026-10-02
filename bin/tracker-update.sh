@@ -15,14 +15,13 @@
 set -uo pipefail
 
 # 源列表, 按优先级排列。第一个为主源, 其余为备用。
-# 实测(2026-10, aarch64): cf.trackerslist.com 与 XIU2 源内容一致(71 条),
-# ngosang 源已过时(仅 20 条), 故降为最低优先级备用。
+# 实测(2026-10, aarch64): cf.trackerslist.com 与 XIU2 源内容一致(71 条);
+# all.txt 为全量(122 条)。仅保留活跃维护的源, 已剔除内容过时的列表。
 TRACKER_SOURCES=(
     "https://cf.trackerslist.com/best.txt"
     "https://cf.trackerslist.com/all.txt"
     "https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt"
     "https://trackerslist.com/best.txt"
-    "https://raw.githubusercontent.com/ngosang/trackerslist/master/trackers_best.txt"
 )
 
 TIMEOUT="${TRACKER_TIMEOUT:-15}"
