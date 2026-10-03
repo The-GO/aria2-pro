@@ -88,6 +88,14 @@ case "${dpkgARCH:-}" in
     armhf)    MAPPED_ARCH="armv7" ;;
 esac
 
+# 上游 asset 命名: 各架构为 aria2-<arch>-linux-musl_static.zip,
+# 唯独 armv7 是 aria2-armv7-linux-musleabihf_static.zip(已对 1.37.0 实测)。
+# 放在 dpkg 覆盖之后, 以最终 MAPPED_ARCH 为准。
+case "${MAPPED_ARCH}" in
+    armv7) ASSET_SUFFIX="linux-musleabihf_static" ;;
+    *)     ASSET_SUFFIX="linux-musl_static" ;;
+esac
+
 # ---- 安装依赖 -------------------------------------------------------------
 info "安装依赖 ..."
 if [[ ${release} == "centos" ]]; then
@@ -101,7 +109,10 @@ fi
 # ---- aria2 二进制 ---------------------------------------------------------
 if [[ -x "${ARIA2C}" ]]; then
     info "检测到已安装: $(${ARIA2C} --version | head -n 1)"
-    read -e -p "是否重新安装/更新 aria2 ? [y/N]: " yn
+    # 先初始化再 read: 管道/EOF 场景下 read 返回非零且变量保持未定义,
+    # 配合 set -u 会直接报 unbound variable。用 || true 吞掉 EOF 的非零退出。
+    yn=""
+    read -e -p "是否重新安装/更新 aria2 ? [y/N]: " yn || true
     [[ "${yn}" != [Yy]* ]] && skip_bin=1 || skip_bin=0
 else
     skip_bin=0
@@ -114,7 +125,7 @@ if [[ ${skip_bin:-0} -eq 0 ]]; then
     [[ -z "${NEW_VER}" || "${NEW_VER}" == "continuous" ]] && NEW_VER="${FALLBACK_VER}"
     info "目标版本: ${NEW_VER}"
     TMP="$(mktemp -d)"
-    URL="https://github.com/abcfy2/aria2-static-build/releases/download/${NEW_VER}/aria2-${MAPPED_ARCH}-linux-musl_static.zip"
+    URL="https://github.com/abcfy2/aria2-static-build/releases/download/${NEW_VER}/aria2-${MAPPED_ARCH}-${ASSET_SUFFIX}.zip"
     info "下载 ${URL}"
     wget -t2 -T20 -qO "${TMP}/a.zip" "${URL}" \
         || curl -fsSL --retry 2 --max-time 90 -o "${TMP}/a.zip" "${URL}"
@@ -238,8 +249,15 @@ LimitNOFILE=65535
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
-    systemctl daemon-reload
-    systemctl enable aria2 >/dev/null 2>&1 || true
+    # 容器里常见: 有 systemctl 二进制但 systemd 并未运行, 此时 daemon-reload
+    # 必然失败; 又因 set -e 会导致整个安装中途 abort。只在 systemd 真正运行时
+    # 才执行 daemon-reload / enable, 单元文件本身照常写入。
+    if [[ -d /run/systemd/system ]]; then
+        systemctl daemon-reload
+        systemctl enable aria2 >/dev/null 2>&1 || true
+    else
+        info "未检测到运行中的 systemd, 跳过 daemon-reload(单元文件已写入 ${UNIT})"
+    fi
     info "已安装 systemd 单元: ${UNIT}"
 else
     # 无 systemd: 安装项目自带的 init.d 脚本(已内置全部修复)

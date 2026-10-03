@@ -8,8 +8,8 @@
 #
 # 主源: https://cf.trackerslist.com/best.txt  (Cloudflare CDN, 最快)
 #
-# 说明: 该文件由 install.sh 以 heredoc 形式安装到 <conf-dir>/tracker-update.sh,
-#       同时作为独立文件存在于仓库 bin/ 目录, 便于单独测试。
+# 说明: install.sh 将该文件安装到 <conf-dir>/tracker-update.sh,
+#       仓库 bin/ 目录下保留独立副本, 便于单独测试。
 #
 
 set -uo pipefail
@@ -43,6 +43,11 @@ fetch_list() {
         | grep -E '^(udp|http|https|wss?|tcp)://' \
         | grep -vE '^[a-z]+://[[:space:]]*$'
 }
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    usage
+    exit 0
+fi
 
 if [[ "${1:-}" == "--test" || "${1:-}" == "-t" ]]; then
     echo "各 tracker 源测速:"
