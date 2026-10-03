@@ -157,18 +157,28 @@ map_arch() {
         echo -e "${Error} 不支持此 CPU 架构。"
         exit 1
     fi
+    # 上游 asset 命名: 各架构为 aria2-<arch>-linux-musl_static.zip,
+    # 唯独 armv7 是 aria2-armv7-linux-musleabihf_static.zip(与 install.sh 保持一致)
+    case "${MAPPED_ARCH}" in
+        armv7) ASSET_SUFFIX="linux-musleabihf_static" ;;
+        *)     ASSET_SUFFIX="linux-musl_static" ;;
+    esac
 }
 
 Download_aria2() {
     update_dl=$1
     check_sys
     map_arch
-    while command -v aria2c >/dev/null 2>&1; do
-        echo -e "${Info} 删除旧版 Aria2 二进制文件..."
-        rm -vf "$(command -v aria2c)"
+    # 只删除真实文件: type -P 排除函数/别名，避免误删当前目录同名文件；
+    # 删后 hash -r 清掉 bash 的命令哈希，保证循环能终止。
+    local old_bin
+    while old_bin="$(type -P aria2c 2>/dev/null)" && [[ -n "${old_bin}" ]]; do
+        echo -e "${Info} 删除旧版 Aria2 二进制文件: ${old_bin}"
+        rm -vf "${old_bin}"
+        hash -r 2>/dev/null
     done
     CREATE_TMP=$(mktemp -d)
-    DOWNLOAD_URL="https://github.com/abcfy2/aria2-static-build/releases/download/${aria2_new_ver}/aria2-${MAPPED_ARCH}-linux-musl_static.zip"
+    DOWNLOAD_URL="https://github.com/abcfy2/aria2-static-build/releases/download/${aria2_new_ver}/aria2-${MAPPED_ARCH}-${ASSET_SUFFIX}.zip"
     # wget 失败时用 curl 重试(避免为单一下载引入第三方镜像依赖)。
     {
         wget -t2 -T10 -qO "${CREATE_TMP}/aria2.zip" "${DOWNLOAD_URL}" ||
@@ -294,8 +304,11 @@ Installation_dependency() {
         apt-get update -y
         DEBIAN_FRONTEND=noninteractive apt-get install -y wget curl nano ca-certificates findutils jq tar gzip unzip dpkg
     fi
+    # 不再从第三方 URL 管道执行脚本安装证书(与 README 的零第三方脚本依赖一致)；
+    # ca-certificates 已由上面的包管理器安装。若此处仍缺失，说明包安装失败，
+    # 直接报错退出，后续的 GitHub 下载也必然因证书校验失败而无法工作。
     if [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
-        wget -qO- git.io/ca-certificates.sh | bash
+        echo -e "${Error} 未找到 CA 证书(/etc/ssl/certs/ca-certificates.crt)，请确认 ca-certificates 已正确安装。" && exit 1
     fi
 }
 
@@ -561,7 +574,7 @@ ${Tip} 手动修改配置文件须知：
         Save_iptables
     fi
     if [[ "${aria2_dir_old}" != "${aria2_dir}" ]]; then
-        mkdir -p ${aria2_dir}
+        mkdir -p "${aria2_dir}"
     fi
     Restart_aria2
 }
@@ -595,11 +608,18 @@ Read_config() {
         conf_text=$(grep -v '^#' "${ARIA2_CONF_DIR}/aria2.conf")
         # 用 cut -d= -f2- 而非 awk -F= '{print $NF}': 后者会把含 = 的
         # 值(如 rpc-secret=ab=cd)截断成最后一段。
-        aria2_dir=$(grep "^dir=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
-        aria2_port=$(grep "^rpc-listen-port=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
-        aria2_passwd=$(grep "^rpc-secret=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
-        aria2_bt_port=$(grep "^listen-port=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
-        aria2_dht_port=$(grep "^dht-listen-port=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
+        # 键匹配容忍行首/等号两侧空格，与 service 脚本的写法统一。
+        conf_get() {
+            local key="$1"
+            grep -E "^[[:space:]]*${key}[[:space:]]*=" <<<"${conf_text}" \
+                | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'
+        }
+        aria2_dir=$(conf_get "dir")
+        aria2_port=$(conf_get "rpc-listen-port")
+        aria2_passwd=$(conf_get "rpc-secret")
+        aria2_bt_port=$(conf_get "listen-port")
+        aria2_dht_port=$(conf_get "dht-listen-port")
+        unset -f conf_get
     fi
 }
 
@@ -679,13 +699,16 @@ Update_bt_tracker_cron() {
 }
 
 crontab_update_start() {
-    crontab -l >"/tmp/crontab.bak" 2>/dev/null
+    # 用 mktemp 而非固定 /tmp/crontab.bak, 避免符号链接竞态与多实例冲突
+    local bak
+    bak="$(mktemp /tmp/aria2-crontab.XXXXXX)" || { echo -e "${Error} 无法创建临时文件 !" && exit 1; }
+    crontab -l >"${bak}" 2>/dev/null
     # 只删本脚本写入的行(带 aria2-pro 标记), 避免误删用户其他含
     # "tracker-update.sh" 字样的 crontab 条目
-    sed -i "/# aria2-pro:tracker-update/d" "/tmp/crontab.bak"
-    echo -e "\n0 7 * * * /bin/bash ${ARIA2_CONF_DIR}/tracker-update.sh 2>&1 | tee ${ARIA2_CONF_DIR}/tracker.log # aria2-pro:tracker-update" >>"/tmp/crontab.bak"
-    crontab "/tmp/crontab.bak"
-    rm -f "/tmp/crontab.bak"
+    sed -i "/# aria2-pro:tracker-update/d" "${bak}"
+    echo -e "\n0 7 * * * /bin/bash ${ARIA2_CONF_DIR}/tracker-update.sh 2>&1 | tee ${ARIA2_CONF_DIR}/tracker.log # aria2-pro:tracker-update" >>"${bak}"
+    crontab "${bak}"
+    rm -f "${bak}"
     if [[ -z $(crontab_update_status) ]]; then
         echo && echo -e "${Error} 自动更新 BT-Tracker 开启失败 !" && exit 1
     else
@@ -695,10 +718,12 @@ crontab_update_start() {
 }
 
 crontab_update_stop() {
-    crontab -l >"/tmp/crontab.bak" 2>/dev/null
-    sed -i "/# aria2-pro:tracker-update/d" "/tmp/crontab.bak"
-    crontab "/tmp/crontab.bak"
-    rm -f "/tmp/crontab.bak"
+    local bak
+    bak="$(mktemp /tmp/aria2-crontab.XXXXXX)" || { echo -e "${Error} 无法创建临时文件 !" && exit 1; }
+    crontab -l >"${bak}" 2>/dev/null
+    sed -i "/# aria2-pro:tracker-update/d" "${bak}"
+    crontab "${bak}"
+    rm -f "${bak}"
     if [[ -n $(crontab_update_status) ]]; then
         echo && echo -e "${Error} 自动更新 BT-Tracker 关闭失败 !" && exit 1
     else
@@ -722,12 +747,9 @@ Update_bt_tracker() {
             exit 1
         fi
     fi
-    check_pid
-    if [[ -z ${PID} ]]; then
-        bash "${script}" "${ARIA2_CONF_DIR}/aria2.conf"
-    else
-        bash "${script}" "${ARIA2_CONF_DIR}/aria2.conf" RPC
-    fi
+    # tracker-update.sh 内部会自动探测运行中的 aria2 并经 JSON-RPC 热更新，
+    # 无需再传参区分运行状态（旧的 "RPC" 哑参数已被移除）。
+    bash "${script}" "${ARIA2_CONF_DIR}/aria2.conf"
 }
 
 Update_aria2() {
@@ -743,10 +765,12 @@ Uninstall_aria2() {
     read -e -p "(默认: n):" unyn
     [[ -z ${unyn} ]] && unyn="n"
     if [[ ${unyn} == [Yy] ]]; then
-        crontab -l >"/tmp/crontab.bak" 2>/dev/null
-        sed -i "/# aria2-pro:tracker-update/d" "/tmp/crontab.bak"
-        crontab "/tmp/crontab.bak"
-        rm -f "/tmp/crontab.bak"
+        local bak
+        bak="$(mktemp /tmp/aria2-crontab.XXXXXX)" || { echo -e "${Error} 无法创建临时文件 !" && exit 1; }
+        crontab -l >"${bak}" 2>/dev/null
+        sed -i "/# aria2-pro:tracker-update/d" "${bak}"
+        crontab "${bak}"
+        rm -f "${bak}"
         check_pid
         [[ ! -z ${PID} ]] && kill -9 ${PID}
         Read_config "un"

@@ -121,13 +121,22 @@ do_start() {
 
 do_stop() {
     check_running || { echo -e "${Info} ${NAME} 未运行"; RETVAL=1; return 1; }
-    kill -9 ${PID} 2>/dev/null
-    # 等待进程真正退出, 否则紧接着 start 会因端口/会话占用失败
+    # 先 SIGTERM 让 aria2 落盘会话/保存下载进度, 5 秒后仍未退出再 SIGKILL。
+    # 直接 kill -9 会导致会话文件来不及保存, 重启后丢失任务状态。
+    kill ${PID} 2>/dev/null
     local i
-    for i in {1..30}; do
+    for i in {1..25}; do
         check_running || break
         sleep 0.2
     done
+    if check_running; then
+        kill -9 ${PID} 2>/dev/null
+        for i in {1..25}; do
+            check_running || break
+            sleep 0.2
+        done
+    fi
+    # 等待进程真正退出, 否则紧接着 start 会因端口/会话占用失败
     echo -e "${Info} ${NAME} 停止成功 !"
     return 0
 }
