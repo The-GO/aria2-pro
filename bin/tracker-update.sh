@@ -85,11 +85,32 @@ if grep -q '^bt-tracker=' "${CONF}"; then
     # 用 awk 而非 sed: tracker 列表含大量正则元字符(/ : . -), sed 会解析失败。
     # 通过环境变量传入而非 `awk -v`: 后者会解析 C 转义序列(\t \n),
     # 值中一旦出现反斜杠会被静默改写。
-    TRACKER_LIST="${LIST}" awk 'BEGIN{FS=OFS="="; v=ENVIRON["TRACKER_LIST"]}
-        $1=="bt-tracker"{$2=v; print; next} {print}' \
+    # 使用 print $1"="v 而非 $2=v: 若旧配置的值中含有 = (如含参 tracker), $2=v 会残留多余段。
+    TRACKER_LIST="${LIST}" awk 'BEGIN{FS="="; v=ENVIRON["TRACKER_LIST"]}
+        $1=="bt-tracker"{print $1"="v; next} {print}' \
         "${CONF}" >"${CONF}.tracker.tmp" && mv -f "${CONF}.tracker.tmp" "${CONF}"
 else
     printf '\nbt-tracker=%s\n' "${LIST}" >>"${CONF}"
 fi
 
 echo "已从 ${GOT} 个源更新 ${COUNT} 个 tracker → ${CONF}"
+
+# 若 aria2 正在运行, 通过 JSON-RPC 热更新 bt-tracker, 无需重启服务
+apply_rpc() {
+    local rpc_port rpc_secret rpc_url payload resp
+    rpc_port="$(grep -E '^[[:space:]]*rpc-listen-port[[:space:]]*=' "${CONF}" 2>/dev/null | tail -n 1 | cut -d= -f2- | tr -d '[:space:]')"
+    [[ -z "${rpc_port}" ]] && rpc_port="6800"
+    rpc_secret="$(grep -E '^[[:space:]]*rpc-secret[[:space:]]*=' "${CONF}" 2>/dev/null | tail -n 1 | cut -d= -f2- | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+    rpc_url="http://127.0.0.1:${rpc_port}/jsonrpc"
+
+    if [[ -n "${rpc_secret}" ]]; then
+        payload='{"jsonrpc":"2.0","id":"tracker-update","method":"aria2.changeGlobalOption","params":["token:'"${rpc_secret}"'",{"bt-tracker":"'"${LIST}"'"}]}'
+    else
+        payload='{"jsonrpc":"2.0","id":"tracker-update","method":"aria2.changeGlobalOption","params":[{"bt-tracker":"'"${LIST}"'"}]}'
+    fi
+    resp="$(curl -s --max-time 5 -d "${payload}" "${rpc_url}" 2>/dev/null || true)"
+    if [[ "${resp}" == *"\"result\":\"OK\""* ]]; then
+        echo "已同步热更新至运行中的 Aria2 实例 (端口 ${rpc_port})。"
+    fi
+}
+apply_rpc

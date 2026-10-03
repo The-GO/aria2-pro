@@ -173,10 +173,10 @@ bash bin/aria2.sh                                    # 11 手动 / 12 自动(每
 |----|------|
 | `https://cf.trackerslist.com/best.txt` | 主源，71 条 |
 | `https://cf.trackerslist.com/all.txt` | 全量，122 条 |
-| `raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt` | 备用 |
+| `https://raw.githubusercontent.com/XIU2/TrackersListCollection/master/best.txt` | 备用 |
 | `https://trackerslist.com/best.txt` | 备用（与主源同内容） |
 
-写入用 `awk` 而非 `sed`——tracker 列表含大量正则元字符，`sed` 替换会失败。crontab 删除时按 `aria2-pro:tracker-update` 标记精确匹配，不会误删你自己的其他任务。
+写入用 `awk` 而非 `sed`——tracker 列表含大量正则元字符，`sed` 替换会失败。同时若 aria2 正在运行，脚本会自动通过 JSON-RPC 调用 `aria2.changeGlobalOption` 热加载 tracker 列表，无需重启服务。crontab 删除时按 `aria2-pro:tracker-update` 标记精确匹配，不会误删你自己的其他任务。
 
 不需要 `dht.dat`：aria2 的 DHT 路由表仅存内存，且 1.37 没有 `dht-file-path` 配置项。
 

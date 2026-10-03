@@ -144,8 +144,8 @@ install -m 0644 "${INSTALL_SRC}/hooks/core" "${ARIA2_CONF_DIR}/hooks/core"
 rewrite_conf() {
     local file="$1" key="$2" val="$3"
     CONF_KEY="${key}" CONF_VAL="${val}" awk \
-        'BEGIN{FS=OFS="="; k=ENVIRON["CONF_KEY"]; v=ENVIRON["CONF_VAL"]}
-         $1==k{$2=v; print; next} {print}' "${file}" >"${file}.tmp" \
+        'BEGIN{FS="="; k=ENVIRON["CONF_KEY"]; v=ENVIRON["CONF_VAL"]}
+         $1==k{print $1"="v; next} {print}' "${file}" >"${file}.tmp" \
         && mv -f "${file}.tmp" "${file}"
 }
 CONF="${ARIA2_CONF_DIR}/aria2.conf"
@@ -169,9 +169,8 @@ if grep -q '^rpc-secret=' "${CONF}"; then
     fi
 fi
 
-# DHT 数据文件(缺失时才下载)
-# dht.dat / dht6.dat 不再预置: 它们是 DHT 路由表的运行时数据, aria2 官方
-# 从不分发, 第三方快照来源不可控。aria2 启动后自行填充并保存到该路径。
+# DHT 路由表说明:
+# aria2 官方从不分发静态 dht.dat / dht6.dat, aria2 1.37.0+ 启动后自行维护。
 
 # tracker 更新工具(独立文件, 不再内嵌 heredoc, 避免两处实现不一致)
 install -m 0755 "${INSTALL_SRC}/bin/tracker-update.sh" "${ARIA2_CONF_DIR}/tracker-update.sh"
@@ -185,8 +184,8 @@ rewrite_initd() {
     local file="$1" key="$2" val="$3"
     # init.d 里形如 KEY="value", 这里负责补上双引号
     ID_KEY="${key}" ID_VAL="${val}" awk \
-        'BEGIN{FS=OFS="="; k=ENVIRON["ID_KEY"]; v=ENVIRON["ID_VAL"]}
-         $1==k{$2="\"" v "\""; print; next} {print}' "${file}" >"${file}.tmp" \
+        'BEGIN{FS="="; k=ENVIRON["ID_KEY"]; v=ENVIRON["ID_VAL"]}
+         $1==k{print $1"=" "\"" v "\""; next} {print}' "${file}" >"${file}.tmp" \
         && mv -f "${file}.tmp" "${file}"
 }
 # 安装 init.d 并按实际路径改写 CONFIG/LOG/ARIA2C(脚本内默认值是 /root/.aria2,
@@ -215,8 +214,14 @@ HAVE_INITD=0
 
 if [[ ${HAVE_INITD} -eq 1 ]]; then
     info "检测到现有 /etc/init.d/aria2, 替换为 aria2-pro 版本(已内置修复)"
-    install_initd "${INSTALL_SRC}/service/aria2_debian"
-    update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
+    if [[ ${release} == "centos" ]]; then
+        install_initd "${INSTALL_SRC}/service/aria2_centos"
+        chkconfig --add aria2 >/dev/null 2>&1 || true
+        chkconfig aria2 on >/dev/null 2>&1 || true
+    else
+        install_initd "${INSTALL_SRC}/service/aria2_debian"
+        update-rc.d -f aria2 defaults >/dev/null 2>&1 || true
+    fi
 elif command -v systemctl >/dev/null 2>&1 && [[ -d /etc/systemd/system ]]; then
     cat > "${UNIT}" <<UNIT_EOF
 [Unit]
@@ -256,7 +261,13 @@ info "  配置/数据: ${ARIA2_CONF_DIR}"
 info "  钩子脚本: ${ARIA2_CONF_DIR}/hooks"
 info "  下载目录: ${DOWNLOAD_PATH}"
 info ""
-info "启动:      systemctl start aria2"
-info "自启:      systemctl enable aria2"
-info "状态:      systemctl status aria2"
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    info "启动:      systemctl start aria2"
+    info "自启:      systemctl enable aria2"
+    info "状态:      systemctl status aria2"
+else
+    info "启动:      /etc/init.d/aria2 start"
+    info "停止:      /etc/init.d/aria2 stop"
+    info "状态:      /etc/init.d/aria2 status"
+fi
 info "管理面板:  bash ${INSTALL_SRC}/bin/aria2.sh"

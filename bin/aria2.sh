@@ -203,12 +203,16 @@ Download_aria2() {
 }
 
 Download_aria2_conf() {
-    PROFILE_LIST="aria2.conf script.conf rclone.env core upload.sh move.sh delete.sh clean.sh LICENSE"
     mkdir -p "${ARIA2_CONF_DIR}" "${HOOKS_DIR}"
     local src="${ARIA2_PRO_SRC:-}"
     if [[ -z "${src}" ]]; then
-        # 未指定源时, 用当前脚本所在目录的 conf/hooks(本地安装)
-        src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        # 未指定源时, 脚本在 bin/ 下则源目录为上一级(包含 conf/ 与 hooks/)
+        local _bin_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if [[ -d "${_bin_dir}/../conf" && -d "${_bin_dir}/../hooks" ]]; then
+            src="$(cd "${_bin_dir}/.." && pwd)"
+        else
+            src="${_bin_dir}"
+        fi
     fi
     if [[ ! -d "${src}/conf" || ! -d "${src}/hooks" ]]; then
         echo -e "${Error} 找不到 aria2-pro 源目录(需要 conf/ 与 hooks/): ${src}"
@@ -217,13 +221,16 @@ Download_aria2_conf() {
     cp -f "${src}/conf/aria2.conf" "${src}/conf/script.conf" "${src}/conf/rclone.env" "${ARIA2_CONF_DIR}/"
     cp -f "${src}/hooks/"* "${HOOKS_DIR}/"
     chmod +x "${HOOKS_DIR}/"*.sh
+    if [[ -f "${src}/bin/tracker-update.sh" ]]; then
+        install -m 0755 "${src}/bin/tracker-update.sh" "${ARIA2_CONF_DIR}/tracker-update.sh"
+    fi
     # 用 awk 整行改写而非 sed: 路径/密钥中可能含 sed 分隔符(@)
     # 与正则元字符, 实测路径含 @ 时 sed 直接语法错误。
     rewrite_conf() {
         local file="$1" key="$2" val="$3"
         CONF_KEY="${key}" CONF_VAL="${val}" awk \
-            'BEGIN{FS=OFS="="; k=ENVIRON["CONF_KEY"]; v=ENVIRON["CONF_VAL"]}
-             $1==k{$2=v; print; next} {print}' "${file}" >"${file}.tmp" \
+            'BEGIN{FS="="; k=ENVIRON["CONF_KEY"]; v=ENVIRON["CONF_VAL"]}
+             $1==k{print $1"="v; next} {print}' "${file}" >"${file}.tmp" \
             && mv -f "${file}.tmp" "${file}"
     }
     local _conf="${ARIA2_CONF_DIR}/aria2.conf"
@@ -263,12 +270,18 @@ Service_aria2() {
     fi
     install -m 0755 "${SVC_FILE}" "${INITD_FILE}"
     chmod +x "${INITD_FILE}"
-    # 按实际配置目录改写 init.d 内的路径(脚本默认值是 /root/.aria2)
-    sed -i \
-        -e "s|^ARIA2C=.*|ARIA2C=\"${ARIA2C}\"|" \
-        -e "s|^CONFIG=.*|CONFIG=\"${ARIA2_CONF_DIR}/aria2.conf\"|" \
-        -e "s|^LOG=.*|LOG=\"${ARIA2_CONF_DIR}/aria2.log\"|" \
-        "${INITD_FILE}"
+    # 按实际配置目录改写 init.d 内的路径(使用 awk + ENVIRON 避免分隔符冲突)
+    rewrite_initd() {
+        local file="$1" key="$2" val="$3"
+        ID_KEY="${key}" ID_VAL="${val}" awk \
+            'BEGIN{FS="="; k=ENVIRON["ID_KEY"]; v=ENVIRON["ID_VAL"]}
+             $1==k{print k"=" "\"" v "\""; next} {print}' "${file}" >"${file}.tmp" \
+            && mv -f "${file}.tmp" "${file}"
+    }
+    rewrite_initd "${INITD_FILE}" ARIA2C "${ARIA2C}"
+    rewrite_initd "${INITD_FILE}" CONFIG "${ARIA2_CONF_DIR}/aria2.conf"
+    rewrite_initd "${INITD_FILE}" LOG "${ARIA2_CONF_DIR}/aria2.log"
+    unset -f rewrite_initd
     # 自带的 init.d 已内置全部修复(僵尸进程排除 / stop 等待退出 / start 轮询就绪)。
     eval ${SVC_REGISTER}
     echo -e "${Info} Aria2服务 管理脚本安装完成 !"
@@ -394,7 +407,7 @@ ${Tip} 留空为随机生成。密钥可含 =、#、空格等字符，配置读�
         else
             # 用固定字符串匹配, 避免密钥中的正则元字符导致 sed 匹配失败
             A2_NEW_SECRET="${aria2_RPC_passwd}" awk \
-                'BEGIN{FS=OFS="="; n=ENVIRON["A2_NEW_SECRET"]} $1=="rpc-secret"{$2=n; print; next} {print}' \
+                'BEGIN{FS="="; n=ENVIRON["A2_NEW_SECRET"]} $1=="rpc-secret"{print $1"="n; next} {print}' \
                 "${ARIA2_CONF_DIR}/aria2.conf" >"${ARIA2_CONF_DIR}/aria2.conf.tmp" &&
                 mv -f "${ARIA2_CONF_DIR}/aria2.conf.tmp" "${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
@@ -447,7 +460,7 @@ Set_aria2_RPC_port() {
             fi
         else
             A2_NEW_PORT="${aria2_RPC_port}" awk \
-                'BEGIN{FS=OFS="="; n=ENVIRON["A2_NEW_PORT"]} $1=="rpc-listen-port"{$2=n; print; next} {print}' \
+                'BEGIN{FS="="; n=ENVIRON["A2_NEW_PORT"]} $1=="rpc-listen-port"{print $1"="n; next} {print}' \
                 "${ARIA2_CONF_DIR}/aria2.conf" >"${ARIA2_CONF_DIR}/aria2.conf.tmp" &&
                 mv -f "${ARIA2_CONF_DIR}/aria2.conf.tmp" "${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
@@ -497,7 +510,7 @@ Set_aria2_RPC_dir() {
             fi
         else
             A2_NEW_DIR="${aria2_RPC_dir}" awk \
-                'BEGIN{FS=OFS="="; n=ENVIRON["A2_NEW_DIR"]} $1=="dir"{$2=n; print; next} {print}' \
+                'BEGIN{FS="="; n=ENVIRON["A2_NEW_DIR"]} $1=="dir"{print $1"="n; next} {print}' \
                 "${ARIA2_CONF_DIR}/aria2.conf" >"${ARIA2_CONF_DIR}/aria2.conf.tmp" &&
                 mv -f "${ARIA2_CONF_DIR}/aria2.conf.tmp" "${ARIA2_CONF_DIR}/aria2.conf"
             if [[ $? -eq 0 ]]; then
@@ -582,11 +595,11 @@ Read_config() {
         conf_text=$(grep -v '^#' "${ARIA2_CONF_DIR}/aria2.conf")
         # 用 cut -d= -f2- 而非 awk -F= '{print $NF}': 后者会把含 = 的
         # 值(如 rpc-secret=ab=cd)截断成最后一段。
-        aria2_dir=$(grep "^dir=" <<<"${conf_text}" | cut -d= -f2-)
-        aria2_port=$(grep "^rpc-listen-port=" <<<"${conf_text}" | cut -d= -f2-)
-        aria2_passwd=$(grep "^rpc-secret=" <<<"${conf_text}" | cut -d= -f2-)
-        aria2_bt_port=$(grep "^listen-port=" <<<"${conf_text}" | cut -d= -f2-)
-        aria2_dht_port=$(grep "^dht-listen-port=" <<<"${conf_text}" | cut -d= -f2-)
+        aria2_dir=$(grep "^dir=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
+        aria2_port=$(grep "^rpc-listen-port=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
+        aria2_passwd=$(grep "^rpc-secret=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
+        aria2_bt_port=$(grep "^listen-port=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
+        aria2_dht_port=$(grep "^dht-listen-port=" <<<"${conf_text}" | tail -n 1 | cut -d= -f2-)
     fi
 }
 
@@ -611,7 +624,7 @@ View_Aria2() {
     if [[ -z "${IPV4}" || -z "${aria2_port}" ]]; then
         AriaNg_URL="null"
     else
-        AriaNg_API="/#!/settings/rpc/set/ws/${IPV4}/${aria2_port}/jsonrpc/$(echo -n ${aria2_passwd} | base64)"
+        AriaNg_API="/#!/settings/rpc/set/ws/${IPV4}/${aria2_port}/jsonrpc/$(printf '%s' "${aria2_passwd}" | base64 | tr -d '\n')"
         AriaNg_URL="http://ariang.js.org${AriaNg_API}"
     fi
     clear
@@ -757,19 +770,26 @@ Uninstall_aria2() {
 # 原版 Add_iptables 用 ${aria2_RPC_port} 而 Del_iptables 用 ${aria2_port},
 # 两者在不同调用路径下不一致, 导致改端口后旧放行规则永远删不掉。
 Add_iptables() {
-    iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${aria2_RPC_port} -j ACCEPT
-    iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport ${aria2_bt_port} -j ACCEPT
-    iptables -I INPUT -m state --state NEW -m udp -p udp --dport ${aria2_dht_port} -j ACCEPT
+    command -v iptables >/dev/null 2>&1 || return 0
+    # iptables 端口范围要求用冒号(:)而非连字符(-), 否则报 invalid port 错误
+    local bt_port="${aria2_bt_port//-/:}"
+    local dht_port="${aria2_dht_port//-/:}"
+    [[ -n "${aria2_RPC_port}" ]] && iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport "${aria2_RPC_port}" -j ACCEPT 2>/dev/null
+    [[ -n "${bt_port}" ]] && iptables -I INPUT -m state --state NEW -m tcp -p tcp --dport "${bt_port}" -j ACCEPT 2>/dev/null
+    [[ -n "${dht_port}" ]] && iptables -I INPUT -m state --state NEW -m udp -p udp --dport "${dht_port}" -j ACCEPT 2>/dev/null
 }
 
 Del_iptables() {
     # 卸载或配置文件缺失时端口变量可能为空, 空端口会让 iptables 报
     # "invalid port/service ''" 噪音, 逐个校验后再删。
+    # 端口范围必须将 - 转换为 : 才能被 iptables 正确识别。
     command -v iptables >/dev/null 2>&1 || return 0
     local del_port=${aria2_port:-${aria2_RPC_port}}
+    local bt_port="${aria2_bt_port//-/:}"
+    local dht_port="${aria2_dht_port//-/:}"
     [[ -n "${del_port}" ]] && iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport "${del_port}" -j ACCEPT 2>/dev/null
-    [[ -n "${aria2_bt_port}" ]] && iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport "${aria2_bt_port}" -j ACCEPT 2>/dev/null
-    [[ -n "${aria2_dht_port}" ]] && iptables -D INPUT -m state --state NEW -m udp -p udp --dport "${aria2_dht_port}" -j ACCEPT 2>/dev/null
+    [[ -n "${bt_port}" ]] && iptables -D INPUT -m state --state NEW -m tcp -p tcp --dport "${bt_port}" -j ACCEPT 2>/dev/null
+    [[ -n "${dht_port}" ]] && iptables -D INPUT -m state --state NEW -m udp -p udp --dport "${dht_port}" -j ACCEPT 2>/dev/null
     return 0
 }
 

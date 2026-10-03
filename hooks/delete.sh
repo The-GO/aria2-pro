@@ -64,6 +64,8 @@ DELETE_ON_STOP() {
     fi
     is_safe_to_delete "${TASK_PATH}" || return 1
     info "Task ${status} (${reason}), deleting: ${TASK_PATH}"
+    [[ -f "${TASK_PATH}.aria2" ]] && rm -vf -- "${TASK_PATH}.aria2"
+    [[ -f "${FILE_PATH}.aria2" ]] && rm -vf -- "${FILE_PATH}.aria2"
     rm -vrf -- "${TASK_PATH}"
 }
 
@@ -74,6 +76,7 @@ DELETE_ON_UNKNOWN() {
     fi
     is_safe_to_delete "${FILE_PATH}" || return 1
     info "Task force-removed and info unreadable, deleting: ${FILE_PATH}"
+    [[ -f "${FILE_PATH}.aria2" ]] && rm -vf -- "${FILE_PATH}.aria2"
     rm -vrf -- "${FILE_PATH}"
 }
 
@@ -84,6 +87,7 @@ DELETE_FILE() {
         GET_TASK_STATUS
         CONVERSION_PATH
         DELETE_ON_STOP
+        DELETE_DOT_ARIA2
         DELETE_DOT_TORRENT
         DELETE_EMPTY_DIR
     elif CHECK_RPC_CONNECTION; then

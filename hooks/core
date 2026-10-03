@@ -280,7 +280,11 @@ OUTPUT_LOG() {
     printf '%s\n' "${LOG}"
     local path="${LOG_PATH}"
     if [[ -n "${path}" && -d "${path%/*}" ]]; then
-        printf '%s\n' "${LOG}" | sed 's,\x1B\[[0-9;]*m,,g' >>"${path}"
+        printf '%s\n' "${LOG}" | sed 's,\x1B\[[0-9;]*m,,g' >>"${path}" 2>/dev/null
+    fi
+    # 钩子总日志: 若定义了 HOOK_LOG 且与 path 不重复, 同步追加记录
+    if [[ -n "${HOOK_LOG}" && -d "${HOOK_LOG%/*}" && "${path}" != "${HOOK_LOG}" ]]; then
+        printf '%s\n' "${LOG}" | sed 's,\x1B\[[0-9;]*m,,g' >>"${HOOK_LOG}" 2>/dev/null
     fi
 }
 
@@ -297,6 +301,12 @@ CHECK_DOT_ARIA2() {
     fi
     if [[ -n "${TASK_PATH}" && -f "${TASK_PATH}.aria2" ]]; then
         cand="${TASK_PATH}.aria2"
+        [[ " ${DOT_ARIA2_FILES[*]} " != *" ${cand} "* ]] && DOT_ARIA2_FILES+=("${cand}")
+    fi
+    # 目录任务场景: 检查父目录同名控制文件(如 /downloads/MyDir.aria2)
+    local parent="${FILE_PATH%/*}"
+    if [[ -n "${parent}" && "${parent}" != "${ARIA2_DOWNLOAD_DIR}" && "${parent}" != "${DOWNLOAD_DIR}" && -f "${parent}.aria2" ]]; then
+        cand="${parent}.aria2"
         [[ " ${DOT_ARIA2_FILES[*]} " != *" ${cand} "* ]] && DOT_ARIA2_FILES+=("${cand}")
     fi
     if [[ ${#DOT_ARIA2_FILES[@]} -eq 0 ]]; then

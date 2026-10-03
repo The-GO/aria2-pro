@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+### BEGIN INIT INFO
+# Provides:          aria2
+# Required-Start:    $network $local_fs $remote_fs
+# Required-Stop:     $network $local_fs $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Aria2 download manager
+# Description:       Aria2 lightweight download utility
+### END INIT INFO
 #
 # aria2-pro — SysV init 服务脚本
 #
@@ -74,7 +83,7 @@ View_Config() {
     if [[ -z "${IPV4}" || -z "${RPC_LISTEN_PORT}" ]]; then
         AriaNg_URL="null"
     else
-        AriaNg_API="/#!/settings/rpc/set/ws/${IPV4}/${RPC_LISTEN_PORT}/jsonrpc/$(echo -n "${RPC_SECRET}" | base64)"
+        AriaNg_API="/#!/settings/rpc/set/ws/${IPV4}/${RPC_LISTEN_PORT}/jsonrpc/$(printf '%s' "${RPC_SECRET}" | base64 | tr -d '\n')"
         AriaNg_URL="http://ariang.js.org${AriaNg_API}"
     fi
     printf '\nAria2 简单配置信息:\n\n'
@@ -88,7 +97,7 @@ View_Config() {
 
 do_start() {
     check_running && { echo -e "${Info} ${NAME} 正在运行(PID ${PID})" && return 0; }
-    [[ ! -x "${ARIA2C}" ]] && { echo -e "${Error} ${ARIA2C} 不存在或不可执行 !" >&2; return 1; }
+    [[ ! -x "${ARIA2C}" ]] && { echo -e "${Error} ${ARIA2C} 不存在或不可执行 !" >&2; RETVAL=1; return 1; }
     echo -e "${Info} ${NAME} 启动中..."
     ulimit -n 65535 2>/dev/null
     nohup "${ARIA2C}" --conf-path="${CONFIG}" >>"${LOG}" 2>&1 &
@@ -101,9 +110,11 @@ do_start() {
     if [[ ${ok} -eq 1 ]]; then
         View_Config
         echo -e "${Info} ${NAME} 启动成功 !"
+        RETVAL=0
         return 0
     fi
     echo -e "${Error} ${NAME} 启动失败, 请查看日志: ${LOG}" >&2
+    RETVAL=1
     return 1
 }
 
@@ -137,13 +148,13 @@ do_restart() {
 }
 
 case "${1:-}" in
-    start)   do_start ;;
-    stop)    do_stop ;;
-    restart) do_restart ;;
-    status)  do_status ;;
+    start|stop|restart|status)
+        do_${1}
+        RETVAL=$?
+        ;;
     *)
         echo "使用方法: $0 { start | stop | restart | status }" >&2
-        RETVAL=1
+        RETVAL=2
         ;;
 esac
 exit ${RETVAL}

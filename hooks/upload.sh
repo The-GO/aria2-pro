@@ -76,6 +76,7 @@ DEFINITION_PATH() {
 # Copy first, verify with hash comparison, and only then remove local data.
 UPLOAD_FILE() {
     info "Start upload ..."
+    LOG_PATH="${UPLOAD_LOG_PATH}"
     TASK_INFO
     local retry=0 max=3 rc
     while [[ ${retry} -le ${max} ]]; do

@@ -26,9 +26,13 @@ DEFINITION_PATH() {
         err "dest-dir is not set in script.conf."
         exit 1
     fi
-    # 目标不能包含源本身, 否则 mv 会把数据移回下载目录
-    if path_is_under "${TASK_PATH}" "${DEST_DIR%/}"; then
-        err "Refusing to move: destination '${DEST_DIR}' contains the source '${TASK_PATH}'."
+    # 目标不能在源目录内部, 否则 mv 会导致递归嵌套移动错误
+    if path_is_under "${DEST_DIR%/}" "${TASK_PATH}"; then
+        err "Refusing to move: destination '${DEST_DIR}' is inside the source '${TASK_PATH}'."
+        exit 1
+    fi
+    if [[ "${TASK_PATH}" == "${DEST_DIR%/}" ]]; then
+        err "Refusing to move: destination is identical to source."
         exit 1
     fi
     SOURCE_PATH="${TASK_PATH}"
@@ -56,6 +60,7 @@ TASK_INFO() {
 
 MOVE_FILE() {
     info "Start move ..."
+    LOG_PATH="${MOVE_LOG_PATH}"
     TASK_INFO
     if [[ ! -e "${SOURCE_PATH}" ]]; then
         LOG="$(date_time) ${ERROR} Move failed, source missing: ${SOURCE_PATH}"
